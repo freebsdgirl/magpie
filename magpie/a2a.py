@@ -1,4 +1,4 @@
-"""A2A SDK 1.1 transport with durable Magpie run identity."""
+"""A2A SDK 1.1 transport with durable Magpie ask run identity."""
 
 from __future__ import annotations
 
@@ -50,8 +50,8 @@ def _load_client_sdk() -> dict[str, Any]:
 
 def build_agent_card(base_url: str) -> AgentCard:
     return AgentCard(
-        name="Magpie Research Worker",
-        description="Natural-language information retrieval with bounded research and specialized API routes.",
+        name="Magpie Ask Worker",
+        description="Natural-language information lookup with bounded web lookup and specialized API routes.",
         version="0.2.0",
         supported_interfaces=[
             AgentInterface(url=f"{base_url.rstrip('/')}/a2a", protocol_binding=TransportProtocol.JSONRPC.value,
@@ -63,9 +63,9 @@ def build_agent_card(base_url: str) -> AgentCard:
         default_input_modes=["text/plain"],
         default_output_modes=["application/json"],
         skills=[AgentSkill(
-            id="magpie_research", name="Natural-language information retrieval",
-            description="Answer a question using bounded web research or a specialized information API.",
-            tags=["research", "search", "weather", "anime", "news"],
+            id="magpie_ask", name="Natural-language question answering",
+            description="Answer a question using bounded web lookup or a specialized information API.",
+            tags=["ask", "search", "weather", "anime", "news"],
             examples=["Who is the mayor of New York?", "What anime airs today?", "What's the latest AI news?"],
             input_modes=["text/plain"], output_modes=["application/json"],
         )],
@@ -105,7 +105,7 @@ class SDKResearchAgentExecutor(AgentExecutor):
             payload = to_jsonable(result)
             await updater.add_artifact(
                 parts=[new_data_part(payload, media_type="application/json")],
-                name="magpie-research-result",
+                name="magpie-ask-result",
             )
             message = Message(
                 role=Role.ROLE_AGENT, message_id=str(uuid4()), task_id=context.task_id,
