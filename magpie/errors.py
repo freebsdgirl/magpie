@@ -41,6 +41,10 @@ class AnimeError(MagpieError):
     """Raised when a specialized anime request fails."""
 
 
+class NewsError(MagpieError):
+    """Raised when a specialized news request fails."""
+
+
 class DependencyError(MagpieError):
     """Raised when an optional runtime dependency is unavailable or uninitialized."""
 

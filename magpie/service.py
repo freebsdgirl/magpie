@@ -9,14 +9,14 @@ from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from pathlib import Path
 
-from .errors import AnimeError, FetchError, ResearchCancelled, ResolverError, WeatherError
+from .errors import AnimeError, FetchError, NewsError, ResearchCancelled, ResolverError, WeatherError
 from .config import Settings
 from .models import (
-    AnimeReport, AnimeRequestKind, EvidenceItem, FreshnessClass, PlanningContext, ResearchErrorResult,
-    ResearchRequest, ResearchResult, RequestRoute, ResponseDetail, RunBudget, SearchRequest,
-    SearchResultRecord, SourceKind, StopReason, SynthesisDraft, WeatherKind, to_jsonable,
+    AnimeReport, AnimeRequestKind, EvidenceItem, FreshnessClass, NewsRequestKind, PlanningContext,
+    ResearchErrorResult, ResearchRequest, ResearchResult, RequestRoute, ResponseDetail, RunBudget,
+    SearchRequest, SearchResultRecord, SourceKind, StopReason, SynthesisDraft, WeatherKind, to_jsonable,
 )
-from .providers.base import AnimeClient, Fetcher, ResolverClient, SearchClient, WeatherClient
+from .providers.base import AnimeClient, Fetcher, NewsClient, ResolverClient, SearchClient, WeatherClient
 from .storage import SQLiteStorage, canonicalize_url, normalize_query
 from .text import valid_unicode
 
@@ -55,6 +55,7 @@ class ResearchService:
     settings: Settings
     weather_client: WeatherClient | None = None
     anime_client: AnimeClient | None = None
+    news_client: NewsClient | None = None
     _resolver_semaphore: threading.BoundedSemaphore = field(default=_GLOBAL_RESOLVER_GATE)
 
     def cancel_run(self, run_id: str) -> None:
@@ -187,7 +188,7 @@ class ResearchService:
     def _try_specialized_route(
         self, run_id: str, request: ResearchRequest, timings: dict[str, list[float]], warnings: list[str]
     ) -> ResearchResult | None:
-        if self.weather_client is None and self.anime_client is None:
+        if self.weather_client is None and self.anime_client is None and self.news_client is None:
             return None
         try:
             decision, elapsed = self._call_resolver("route_request", request.question)
@@ -204,6 +205,8 @@ class ResearchService:
             return None
         if decision.route == RequestRoute.ANIME and self.anime_client is not None:
             return self._try_anime_route(run_id, request, timings, warnings)
+        if decision.route == RequestRoute.NEWS and self.news_client is not None:
+            return self._try_news_route(run_id, request, timings, warnings)
         if decision.route != RequestRoute.WEATHER or self.weather_client is None:
             return None
         if not decision.zip_code:
@@ -312,6 +315,49 @@ class ResearchService:
         self._trace(run_id, "COMPLETED", ["status: ok", "route: anime"])
         return ResearchResult(
             "ok", run_id, report.summary, report.answer, references, warnings=warnings,
+            stop_reason=StopReason.SPECIALIZED_ROUTE,
+            debug=self._build_debug(run_id, request, timings),
+        )
+
+    def _try_news_route(
+        self, run_id: str, request: ResearchRequest, timings: dict[str, list[float]], warnings: list[str]
+    ) -> ResearchResult | None:
+        try:
+            news_request, elapsed = self._call_resolver("classify_news_request", request.question)
+            self._record_timing(timings, "resolver.classify_news_request", elapsed)
+            self._trace(run_id, "NEWS REQUEST CLASSIFIED", [
+                f"kind: {news_request.kind.value}",
+                f"category: {news_request.category.value if news_request.category else ''}",
+                f"time_scope: {news_request.time_scope.value}",
+                f"elapsed_ms: {elapsed}",
+            ])
+            if news_request.kind == NewsRequestKind.UNSUPPORTED_TOPIC:
+                self._trace(run_id, "NEWS ROUTE FALLBACK", ["reason: unsupported_topic"])
+                return None
+            started = perf_counter()
+            limit = min(self.settings.news_digest_size, max(0, request.max_references))
+            report = self.news_client.get_news(news_request, limit)
+            self._record_timing(timings, "news", round((perf_counter() - started) * 1000, 2))
+        except NewsError as exc:
+            warnings.append(f"Specialized news lookup failed; used web research instead: {exc}")
+            self._trace(run_id, "NEWS ROUTE FALLBACK", [f"error: {exc}"])
+            return None
+        warnings.extend(report.warnings)
+        references = report.references[: max(0, request.max_references)]
+        self.storage.save_final_answer(run_id, report.summary, report.answer, references)
+        self.storage.update_run_status(run_id, "completed", StopReason.SPECIALIZED_ROUTE.value)
+        self._trace(run_id, "COMPLETED", [
+            "status: ok",
+            "route: news",
+            f"reference_count: {len(references)}",
+        ])
+        return ResearchResult(
+            "ok",
+            run_id,
+            report.summary,
+            report.answer,
+            references,
+            warnings=warnings,
             stop_reason=StopReason.SPECIALIZED_ROUTE,
             debug=self._build_debug(run_id, request, timings),
         )

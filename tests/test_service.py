@@ -15,6 +15,11 @@ from magpie.models import (
     CharacterCredit,
     FetchedSource,
     FreshnessClass,
+    NewsCategory,
+    NewsReport,
+    NewsRequest,
+    NewsRequestKind,
+    NewsTimeScope,
     Reference,
     ResearchRequest,
     ResponseDetail,
@@ -227,10 +232,52 @@ class FakeAnimeClient:
         )
 
 
+class NewsRoutingResolver(FakeResolverClient):
+    def __init__(self, news_request: NewsRequest | None = None) -> None:
+        super().__init__()
+        self.news_request = news_request or NewsRequest(
+            NewsRequestKind.CATEGORY, NewsCategory.AI, NewsTimeScope.LAST_24_HOURS
+        )
+
+    def route_request(self, question):
+        return RouteDecision(RequestRoute.NEWS)
+
+    def classify_news_request(self, question):
+        return self.news_request
+
+
+class FakeNewsClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[NewsRequest, int]] = []
+
+    def get_news(self, request: NewsRequest, max_items: int) -> NewsReport:
+        self.calls.append((request, max_items))
+        references = [
+            Reference(
+                f"rss:{index}",
+                f"Story {index}",
+                f"https://example.com/story-{index}",
+                "Example Feed",
+                f"2026-06-15T0{index}:00:00-07:00",
+                None,
+                SourceKind.RSS_FEED,
+            )
+            for index in range(1, max_items + 1)
+        ]
+        answer = "\n".join(
+            f"{index}. 2026-06-15 0{index}:00 PDT | Story {index} | Summary {index}. | Example Feed"
+            for index in range(1, max_items + 1)
+        )
+        return NewsReport("Latest AI news.", answer, references)
+
+    def doctor_check(self, live: bool = False) -> dict[str, object]:
+        return {"status": "ok", "live": live}
+
+
 class ServiceTests(unittest.TestCase):
     def _service(
         self, tmpdir: str, resolver=None, search_client=None, fetcher=None, weather_client=None,
-        anime_client=None,
+        anime_client=None, news_client=None,
     ) -> ResearchService:
         storage = SQLiteStorage(Path(tmpdir) / "magpie.db")
         storage.initialize()
@@ -243,6 +290,7 @@ class ServiceTests(unittest.TestCase):
             settings=settings,
             weather_client=weather_client,
             anime_client=anime_client,
+            news_client=news_client,
         )
 
     def test_anime_credit_route_returns_only_selected_credit(self) -> None:
@@ -314,6 +362,64 @@ class ServiceTests(unittest.TestCase):
 
         self.assertEqual(result.status, "ok")
         self.assertTrue(any("could not determine a US ZIP code" in item for item in result.warnings))
+
+    def test_news_route_bypasses_web_research(self) -> None:
+        class ExplodingSearch(FakeSearchClient):
+            def search(self, request):
+                raise AssertionError("news route must not search")
+
+        news = FakeNewsClient()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = self._service(
+                tmpdir,
+                resolver=NewsRoutingResolver(),
+                search_client=ExplodingSearch(),
+                news_client=news,
+            )
+            result = service.research(ResearchRequest(question="what's the latest AI news?", max_references=3))
+
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(len(result.references), 3)
+        self.assertEqual(news.calls[0][1], 3)
+        self.assertEqual(result.stop_reason.value, "specialized_route")
+
+    def test_news_unsupported_topic_falls_back_to_web_research(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            search_client = FakeSearchClient(index={
+                "latest openai news": [
+                    SearchResultRecord(
+                        title="OpenAI launches example feature",
+                        url="https://example.com/openai-feature",
+                        snippet="OpenAI launched an example feature.",
+                        site_name="Example News",
+                        published_at="2026-06-15",
+                        provider="fake",
+                        inline_text="OpenAI launched an example feature on June 15, 2026.",
+                    )
+                ]
+            })
+            fetcher = FakeFetcher(pages={
+                "https://example.com/openai-feature": FetchedSource(
+                    url="https://example.com/openai-feature",
+                    title="OpenAI launches example feature",
+                    site_name="Example News",
+                    text="OpenAI launched an example feature on June 15, 2026.",
+                    published_at="2026-06-15",
+                    retrieved_via="fake",
+                    source_kind=SourceKind.PAGE_FETCH,
+                )
+            })
+            service = self._service(
+                tmpdir,
+                resolver=NewsRoutingResolver(NewsRequest(NewsRequestKind.UNSUPPORTED_TOPIC, None, NewsTimeScope.LAST_24_HOURS)),
+                news_client=FakeNewsClient(),
+                search_client=search_client,
+                fetcher=fetcher,
+            )
+            result = service.research(ResearchRequest(question="latest OpenAI news"))
+
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.stop_reason.value, "needed_new_search")
 
     def test_exact_query_match_answers_from_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

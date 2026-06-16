@@ -65,8 +65,8 @@ def build_agent_card(base_url: str) -> AgentCard:
         skills=[AgentSkill(
             id="magpie_research", name="Natural-language information retrieval",
             description="Answer a question using bounded web research or a specialized information API.",
-            tags=["research", "search", "weather", "anime"],
-            examples=["Who is the mayor of New York?", "What anime airs today?"],
+            tags=["research", "search", "weather", "anime", "news"],
+            examples=["Who is the mayor of New York?", "What anime airs today?", "What's the latest AI news?"],
             input_modes=["text/plain"], output_modes=["application/json"],
         )],
     )

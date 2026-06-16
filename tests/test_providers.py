@@ -5,15 +5,17 @@ import os
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
 
 from magpie.config import Settings
-from magpie.models import AnimeField, FreshnessClass, SearchRequest, WeatherKind
+from magpie.models import AnimeField, FreshnessClass, NewsCategory, NewsRequest, NewsRequestKind, NewsTimeScope, SearchRequest, WeatherKind
 from magpie.providers.anilist import AniListClient
 from magpie.providers.exa import ExaSearchClient
 from magpie.providers.neonhail import NeonHailWeatherClient
+from magpie.providers.news_rss import NewsRSSClient
 
 
 class ExaProviderTests(unittest.TestCase):
@@ -229,6 +231,117 @@ class AniListProviderTests(unittest.TestCase):
 
         self.assertIn("Example Anime, episode 3", report.answer)
         self.assertNotIn("anilist:", report.answer)
+
+
+class NewsRSSProviderTests(unittest.TestCase):
+    def _settings(self, tmpdir: str, **overrides: object) -> Settings:
+        data: dict[str, object] = {
+            "database_path": str(Path(tmpdir) / "magpie.db"),
+            "search_provider": "fake",
+            "fetch_provider": "fake",
+            "resolver_backend": "fake",
+            "news_digest_size": 5,
+            "news_per_source_limit": 1,
+            "news_summary_max_characters": 80,
+            "news_timeout_seconds": 5.0,
+        }
+        data.update(overrides)
+        path = Path(tmpdir) / "config.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return Settings.load(str(path))
+
+    def test_rss_feed_is_parsed_filtered_and_deduplicated(self) -> None:
+        previous_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "America/Los_Angeles"
+        time.tzset()
+        try:
+            now = datetime.now().astimezone()
+            today = now.strftime("%a, %d %b %Y %H:%M:%S %z")
+            recent = (now - timedelta(hours=2)).strftime("%a, %d %b %Y %H:%M:%S %z")
+            feed_one = f"""<?xml version="1.0"?>
+<rss><channel><title>Feed One</title>
+<item><title>AI Story One</title><link>https://example.com/a?utm_source=x</link><pubDate>{today}</pubDate><description><![CDATA[<p>Useful <b>summary</b> one.</p>]]></description></item>
+<item><title>AI Story One</title><link>https://example.com/a</link><pubDate>{recent}</pubDate><description>Duplicate title</description></item>
+</channel></rss>"""
+            feed_two = f"""<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom"><title>Feed Two</title>
+<entry><title>AI Story Two</title><link href="https://example.com/b"/><updated>{now.isoformat()}</updated><summary>Second story summary that is intentionally somewhat long so it needs bounding eventually.</summary></entry>
+</feed>"""
+            calls: list[str] = []
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                calls.append(str(request.url))
+                if "feed-one" in str(request.url):
+                    return httpx.Response(200, text=feed_one)
+                return httpx.Response(200, text=feed_two)
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                registry_path = Path(tmpdir) / "feeds.json"
+                registry_path.write_text(json.dumps([
+                    {"id": "ars-ai", "name": "Feed One", "url": "https://feeds.test/feed-one", "categories": ["ai"], "enabled": True},
+                    {"id": "techcrunch-ai", "name": "Feed Two", "url": "https://feeds.test/feed-two", "categories": ["ai"], "enabled": True},
+                ]), encoding="utf-8")
+                client = NewsRSSClient(
+                    self._settings(tmpdir, news_feed_registry_path=str(registry_path)),
+                    transport=httpx.MockTransport(handler),
+                )
+                report = client.get_news(
+                    NewsRequest(NewsRequestKind.CATEGORY, NewsCategory.AI, NewsTimeScope.LAST_24_HOURS),
+                    5,
+                )
+
+            self.assertEqual(len(report.references), 2)
+            self.assertEqual(report.references[0].source_kind.value, "rss_feed")
+            self.assertIn("AI Story One", report.answer)
+            self.assertIn("AI Story Two", report.answer)
+            self.assertNotIn("<b>", report.answer)
+            self.assertEqual(len(calls), 2)
+        finally:
+            if previous_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous_tz
+            time.tzset()
+
+    def test_registry_override_can_disable_builtin_feeds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry_path = Path(tmpdir) / "feeds.json"
+            registry_path.write_text(json.dumps([
+                {"id": "bbc-general", "name": "BBC News", "url": "https://feeds.bbci.co.uk/news/rss.xml", "categories": ["general"], "enabled": False},
+                {"id": "custom-general", "name": "Custom", "url": "https://feeds.test/custom", "categories": ["general"], "enabled": True},
+            ]), encoding="utf-8")
+            client = NewsRSSClient(self._settings(tmpdir, news_feed_registry_path=str(registry_path)))
+
+        self.assertTrue(all(feed.feed_id != "bbc-general" for feed in client._feeds))
+        self.assertTrue(any(feed.feed_id == "custom-general" for feed in client._feeds))
+
+    def test_feed_cache_avoids_refetch_within_ttl(self) -> None:
+        now = datetime.now().astimezone().strftime("%a, %d %b %Y %H:%M:%S %z")
+        feed = f"""<?xml version="1.0"?><rss><channel><title>Feed</title>
+<item><title>Cached Story</title><link>https://example.com/cached</link><pubDate>{now}</pubDate><description>Cached summary</description></item>
+</channel></rss>"""
+        calls = 0
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(200, text=feed)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry_path = Path(tmpdir) / "feeds.json"
+            registry_path.write_text(json.dumps([
+                {"id": "ars-ai", "name": "Feed Cache", "url": "https://feeds.test/cache", "categories": ["ai"], "enabled": True},
+                {"id": "techcrunch-ai", "name": "Disable Extra", "url": "https://techcrunch.com/category/artificial-intelligence/feed/", "categories": ["ai"], "enabled": False},
+            ]), encoding="utf-8")
+            client = NewsRSSClient(
+                self._settings(tmpdir, news_feed_registry_path=str(registry_path), news_cache_ttl_seconds=300),
+                transport=httpx.MockTransport(handler),
+            )
+            request = NewsRequest(NewsRequestKind.CATEGORY, NewsCategory.AI, NewsTimeScope.LAST_24_HOURS)
+            client.get_news(request, 5)
+            client.get_news(request, 5)
+
+        self.assertEqual(calls, 1)
 
 
 if __name__ == "__main__":

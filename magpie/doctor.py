@@ -7,18 +7,33 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
-from .providers.base import Fetcher, SearchClient
+from .providers.base import Fetcher, NewsClient, SearchClient
 
 
-def run_doctor(settings: Settings, search_client: SearchClient, fetcher: Fetcher, live: bool = False) -> dict[str, Any]:
+def run_doctor(
+    settings: Settings,
+    search_client: SearchClient,
+    fetcher: Fetcher,
+    news_client: NewsClient | None = None,
+    live: bool = False,
+) -> dict[str, Any]:
     report = {
         "status": "ok",
         "configuration": settings.sanitized_diagnostics(),
         "database": _database_check(settings.expanded_database_path),
         "search": search_client.doctor_check(live=live),
         "fetch": fetcher.doctor_check(live=live),
+        "news": news_client.doctor_check(live=live) if news_client is not None else {
+            "status": "ok",
+            "enabled": False,
+            "provider": "rss_feed",
+            "live": live,
+        },
     }
-    if any(section.get("status") != "ok" for section in (report["database"], report["search"], report["fetch"])):
+    if any(
+        section.get("status") != "ok"
+        for section in (report["database"], report["search"], report["fetch"], report["news"])
+    ):
         report["status"] = "error"
     return report
 

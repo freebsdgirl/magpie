@@ -115,7 +115,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "doctor":
-            payload = run_doctor(app.settings, app.search_client, app.fetcher, live=args.live)
+            payload = run_doctor(app.settings, app.search_client, app.fetcher, app.news_client, live=args.live)
             if args.as_json:
                 print(json.dumps(payload, indent=2, sort_keys=True))
             else:

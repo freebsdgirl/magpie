@@ -10,6 +10,8 @@ from ..models import (
     AnimeField,
     AnimeReport,
     AnimeRequest,
+    NewsReport,
+    NewsRequest,
     CharacterCredit,
     FetchedSource,
     PlanningContext,
@@ -27,6 +29,8 @@ class ResolverClient(Protocol):
     def route_request(self, question: str) -> RouteDecision: ...
 
     def classify_anime_request(self, question: str) -> AnimeRequest: ...
+
+    def classify_news_request(self, question: str) -> NewsRequest: ...
 
     def refine_anime_title_queries(self, question: str, attempted_query: str) -> list[str]: ...
 
@@ -70,3 +74,9 @@ class AnimeClient(Protocol):
     def get_credits(self, anime_id: int) -> tuple[str, list[CharacterCredit], Reference]: ...
 
     def get_daily_schedule(self) -> AnimeReport: ...
+
+
+class NewsClient(Protocol):
+    def get_news(self, request: NewsRequest, max_items: int) -> NewsReport: ...
+
+    def doctor_check(self, live: bool = False) -> dict[str, object]: ...

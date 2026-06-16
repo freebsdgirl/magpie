@@ -21,6 +21,10 @@ from ..models import (
     AnimeRequestKind,
     CharacterCredit,
     EvidenceItem,
+    NewsCategory,
+    NewsRequest,
+    NewsRequestKind,
+    NewsTimeScope,
     PlanningContext,
     QueryProposal,
     RequestRoute,
@@ -60,16 +64,17 @@ class OpenAICompatibleResolverClient:
                 "Classify the request for an information-retrieval agent. Return compact JSON only. "
                 "Use route=weather only for requests asking about weather conditions or a weather forecast. "
                 "Use route=anime for requests about anime titles, anime schedules, characters, or voice actors. "
+                "Use route=news only for broad news category requests such as world news, AI news, politics news, or news today. "
                 "For weather, extract or infer the primary five-digit US ZIP code when confident; otherwise use null. "
                 "Use weather_kind=conditions for current/outside/right-now requests and forecast for future outlooks. "
-                "For anime and web_research, weather_kind and zip_code must be null."
+                "For anime, news, and web_research, weather_kind and zip_code must be null."
             ),
             user={"question": question},
             schema_name="magpie_route_request",
             schema={
                 "type": "object",
                 "properties": {
-                    "route": {"type": "string", "enum": ["web_research", "weather", "anime"]},
+                    "route": {"type": "string", "enum": ["web_research", "weather", "anime", "news"]},
                     "weather_kind": {"type": ["string", "null"], "enum": ["conditions", "forecast", None]},
                     "zip_code": {"type": ["string", "null"]},
                 },
@@ -144,6 +149,55 @@ class OpenAICompatibleResolverClient:
         if kind == AnimeRequestKind.LOOKUP and not fields:
             fields = [AnimeField.DESCRIPTION]
         return AnimeRequest(kind, title, character, fields)
+
+    def classify_news_request(self, question: str) -> NewsRequest:
+        payload = self._ask_json(
+            "classify_news_request",
+            system=(
+                "Classify a broad news request. Return compact JSON only. "
+                "Use kind=category only for broad news categories like general, world, us, politics, business, "
+                "technology, ai, science, health, entertainment, or sports. "
+                "Use kind=unsupported_topic for named entities, specific companies, arbitrary topics, or specific stories. "
+                "Default latest or unspecified time windows to last_24_hours. "
+                "Map today to today, yesterday to yesterday, and this week to last_7_days."
+            ),
+            user={"question": question},
+            schema_name="magpie_news_request",
+            schema={
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["category", "unsupported_topic"]},
+                    "category": {
+                        "type": ["string", "null"],
+                        "enum": [
+                            "general", "world", "us", "politics", "business", "technology", "ai",
+                            "science", "health", "entertainment", "sports", None,
+                        ],
+                    },
+                    "time_scope": {
+                        "type": "string",
+                        "enum": ["last_24_hours", "today", "yesterday", "last_7_days"],
+                    },
+                },
+                "required": ["kind", "category", "time_scope"],
+                "additionalProperties": False,
+            },
+        )
+        try:
+            kind = NewsRequestKind(str(payload.get("kind")))
+        except ValueError:
+            kind = NewsRequestKind.UNSUPPORTED_TOPIC
+        try:
+            category = NewsCategory(str(payload.get("category"))) if payload.get("category") is not None else None
+        except ValueError:
+            category = None
+        try:
+            time_scope = NewsTimeScope(str(payload.get("time_scope")))
+        except ValueError:
+            time_scope = NewsTimeScope.LAST_24_HOURS
+        if kind == NewsRequestKind.CATEGORY and category is None:
+            kind = NewsRequestKind.UNSUPPORTED_TOPIC
+        return NewsRequest(kind=kind, category=category, time_scope=time_scope)
 
     def refine_anime_title_queries(self, question: str, attempted_query: str) -> list[str]:
         payload = self._ask_json(

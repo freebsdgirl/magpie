@@ -272,6 +272,7 @@ class CLITests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["status"], "ok")
+        self.assertIn("news", payload)
 
     def test_human_output_renders_multiline_answer_on_own_block(self) -> None:
         rendered = cli._human_output(

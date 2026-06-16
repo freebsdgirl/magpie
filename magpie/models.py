@@ -34,12 +34,14 @@ class SourceKind(str, Enum):
     SEARCH_RESULT_FALLBACK = "search_result_fallback"
     WEATHER_API = "weather_api"
     ANILIST_API = "anilist_api"
+    RSS_FEED = "rss_feed"
 
 
 class RequestRoute(str, Enum):
     WEB_RESEARCH = "web_research"
     WEATHER = "weather"
     ANIME = "anime"
+    NEWS = "news"
 
 
 class WeatherKind(str, Enum):
@@ -68,6 +70,32 @@ class AnimeField(str, Enum):
     SOURCE_MATERIAL = "source_material"
     AVERAGE_SCORE = "average_score"
     NEXT_AIRING_EPISODE = "next_airing_episode"
+
+
+class NewsCategory(str, Enum):
+    GENERAL = "general"
+    WORLD = "world"
+    US = "us"
+    POLITICS = "politics"
+    BUSINESS = "business"
+    TECHNOLOGY = "technology"
+    AI = "ai"
+    SCIENCE = "science"
+    HEALTH = "health"
+    ENTERTAINMENT = "entertainment"
+    SPORTS = "sports"
+
+
+class NewsTimeScope(str, Enum):
+    LAST_24_HOURS = "last_24_hours"
+    TODAY = "today"
+    YESTERDAY = "yesterday"
+    LAST_7_DAYS = "last_7_days"
+
+
+class NewsRequestKind(str, Enum):
+    CATEGORY = "category"
+    UNSUPPORTED_TOPIC = "unsupported_topic"
 
 
 @dataclass(slots=True)
@@ -147,6 +175,31 @@ class AnimeRequest:
     title_query: str | None = None
     character_query: str | None = None
     requested_fields: list[AnimeField] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class NewsRequest:
+    kind: NewsRequestKind
+    category: NewsCategory | None = None
+    time_scope: NewsTimeScope = NewsTimeScope.LAST_24_HOURS
+
+
+@dataclass(slots=True)
+class NewsItem:
+    title: str
+    url: str
+    source_name: str
+    published_at: str
+    summary: str
+    category: NewsCategory
+
+
+@dataclass(slots=True)
+class NewsReport:
+    summary: str
+    answer: str
+    references: list[Reference]
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

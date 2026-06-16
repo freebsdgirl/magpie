@@ -36,6 +36,7 @@ without drowning in context.
 - routes current-condition and forecast requests to the Neon Hail weather API
 - answers anime facts, Japanese voice-cast questions, and local-time airing
   schedules through AniList
+- returns compact category news digests from publisher RSS and Atom feeds
 - caches useful source snapshots and completed answers in SQLite
 - exposes durable, cancellable research runs through A2A
 - records resolver, fetch, timing, and run diagnostics for debugging
@@ -87,6 +88,7 @@ include:
 - `MAGPIE_DATABASE_PATH`
 - `MAGPIE_A2A_BASE_URL`
 - `MAGPIE_WEATHER_ENABLED`
+- `MAGPIE_NEWS_ENABLED`
 
 ## Run
 
@@ -103,6 +105,8 @@ magpie research "Who is the mayor of New York?"
 magpie research "How do I make homemade sourdough bread?"
 magpie research "What's the weather in 98230?"
 magpie research "Give me the forecast for 98230" --json
+magpie research "What's the latest AI news?"
+magpie research "world news from yesterday" --json
 magpie research "Compare the latest policies" --json --debug
 ```
 
@@ -150,8 +154,11 @@ code builds the GraphQL query and returns only the requested values. Daily anime
 schedules use Japanese broadcast times converted to the system timezone.
 Jikan is used only as a fallback title-discovery index when AniList cannot
 resolve a spelling variant; final anime data and references still come from
-AniList. If a specialized route fails, Magpie falls back to general web
-research.
+AniList. Broad category news requests are classified a second time into a
+category and strict local-time window, then answered directly from configured
+RSS or Atom feeds without article fetching or synthesis. Arbitrary topics such
+as company-specific news fall back to general web research. If a specialized
+route fails, Magpie falls back to general web research.
 
 General research follows a bounded incremental loop:
 
@@ -222,6 +229,8 @@ content, and model output; do not publish them without reviewing their contents.
   interpretation.
 - Specialized API routes should bypass general research when they can produce a
   better grounded result.
+- The built-in RSS registry is intended for local or personal aggregation.
+  Check publisher terms before redistributing feed content.
 - API clients should request and retain only fields needed for the final answer;
   provider metadata must not leak into resolver prompts or user-facing output.
 - Do not cache rejected sources as answer candidates.

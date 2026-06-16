@@ -73,6 +73,12 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.http_port, 8124)
         self.assertEqual(settings.loaded_config_path, str(explicit_config.resolve()))
 
+    def test_news_settings_are_exposed_in_diagnostics(self) -> None:
+        settings = Settings(news_enabled=True, news_digest_size=4, news_summary_max_characters=200)
+        diagnostics = settings.sanitized_diagnostics()
+        self.assertEqual(diagnostics["news_digest_size"], 4)
+        self.assertEqual(diagnostics["news_summary_max_characters"], 200)
+
 
 if __name__ == "__main__":
     unittest.main()

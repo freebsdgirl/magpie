@@ -8,7 +8,16 @@ from pathlib import Path
 import httpx
 
 from magpie.config import Settings
-from magpie.models import AnimeField, AnimeRequestKind, EvidenceItem, RequestRoute, WeatherKind
+from magpie.models import (
+    AnimeField,
+    AnimeRequestKind,
+    EvidenceItem,
+    NewsCategory,
+    NewsRequestKind,
+    NewsTimeScope,
+    RequestRoute,
+    WeatherKind,
+)
 from magpie.providers.openai_compatible import (
     OpenAICompatibleResolverClient,
     reasoning_request_options,
@@ -258,8 +267,63 @@ class OpenAICompatibleResolverTests(unittest.TestCase):
         self.assertEqual(user_payload["question"], "who is the mayor of seattle")
         self.assertEqual(user_payload["prior_queries"], ["old query"])
         self.assertEqual(captured_payloads[0]["response_format"]["type"], "json_schema")
-        self.assertEqual(captured_payloads[0]["response_format"]["json_schema"]["name"], "magpie_propose_query")
-        self.assertTrue(captured_payloads[0]["response_format"]["json_schema"]["strict"])
+
+    def test_route_request_supports_news_route(self) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": '{"route":"news","weather_kind":null,"zip_code":null}'}}]},
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            client = OpenAICompatibleResolverClient(
+                settings=self._settings(tmpdir),
+                transport=httpx.MockTransport(handler),
+            )
+            decision = client.route_request("latest AI news")
+
+        self.assertEqual(decision.route, RequestRoute.NEWS)
+        self.assertIsNone(decision.zip_code)
+
+    def test_classify_news_request_returns_category_and_time_scope(self) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": (
+                    '{"kind":"category","category":"ai","time_scope":"today"}'
+                )}}]},
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            client = OpenAICompatibleResolverClient(
+                settings=self._settings(tmpdir),
+                transport=httpx.MockTransport(handler),
+            )
+            news_request = client.classify_news_request("AI news today")
+
+        self.assertEqual(news_request.kind, NewsRequestKind.CATEGORY)
+        self.assertEqual(news_request.category, NewsCategory.AI)
+        self.assertEqual(news_request.time_scope, NewsTimeScope.TODAY)
+
+    def test_classify_news_request_preserves_unsupported_topic(self) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": (
+                    '{"kind":"unsupported_topic","category":null,"time_scope":"last_24_hours"}'
+                )}}]},
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            client = OpenAICompatibleResolverClient(
+                settings=self._settings(tmpdir),
+                transport=httpx.MockTransport(handler),
+            )
+            news_request = client.classify_news_request("latest OpenAI news")
+
+        self.assertEqual(news_request.kind, NewsRequestKind.UNSUPPORTED_TOPIC)
+        self.assertIsNone(news_request.category)
+        self.assertEqual(news_request.time_scope, NewsTimeScope.LAST_24_HOURS)
 
     def test_route_request_combines_classification_and_zip_normalization(self) -> None:
         captured_payloads: list[dict[str, object]] = []

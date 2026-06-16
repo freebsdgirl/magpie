@@ -57,6 +57,15 @@ class Settings:
     anime_candidate_limit: int = 5
     anime_character_limit: int = 50
     anime_schedule_limit: int = 50
+    news_enabled: bool = True
+    news_feed_registry_path: str = ""
+    news_timeout_seconds: float = 15.0
+    news_cache_ttl_seconds: int = 300
+    news_max_feed_bytes: int = 1048576
+    news_fetch_concurrency: int = 4
+    news_digest_size: int = 5
+    news_per_source_limit: int = 2
+    news_summary_max_characters: int = 280
     resolver_backend: str = "openai_compatible"
     resolver_base_url: str = "http://localhost:11434/v1"
     resolver_model: str = "qwen3:8b"
@@ -163,6 +172,20 @@ class Settings:
             raise ConfigError("anime_character_limit must be between 1 and 50.")
         if not 1 <= self.anime_schedule_limit <= 50:
             raise ConfigError("anime_schedule_limit must be between 1 and 50.")
+        if self.news_timeout_seconds <= 0:
+            raise ConfigError("news_timeout_seconds must be positive.")
+        if self.news_cache_ttl_seconds < 0:
+            raise ConfigError("news_cache_ttl_seconds must be non-negative.")
+        if self.news_max_feed_bytes < 1024:
+            raise ConfigError("news_max_feed_bytes must be at least 1024.")
+        if not 1 <= self.news_fetch_concurrency <= 16:
+            raise ConfigError("news_fetch_concurrency must be between 1 and 16.")
+        if not 1 <= self.news_digest_size <= 10:
+            raise ConfigError("news_digest_size must be between 1 and 10.")
+        if not 1 <= self.news_per_source_limit <= 5:
+            raise ConfigError("news_per_source_limit must be between 1 and 5.")
+        if not 40 <= self.news_summary_max_characters <= 1000:
+            raise ConfigError("news_summary_max_characters must be between 40 and 1000.")
 
     @property
     def expanded_database_path(self) -> Path:
@@ -192,6 +215,15 @@ class Settings:
             "anime_candidate_limit": self.anime_candidate_limit,
             "anime_character_limit": self.anime_character_limit,
             "anime_schedule_limit": self.anime_schedule_limit,
+            "news_enabled": self.news_enabled,
+            "news_feed_registry_path": self.news_feed_registry_path,
+            "news_timeout_seconds": self.news_timeout_seconds,
+            "news_cache_ttl_seconds": self.news_cache_ttl_seconds,
+            "news_max_feed_bytes": self.news_max_feed_bytes,
+            "news_fetch_concurrency": self.news_fetch_concurrency,
+            "news_digest_size": self.news_digest_size,
+            "news_per_source_limit": self.news_per_source_limit,
+            "news_summary_max_characters": self.news_summary_max_characters,
             "resolver_backend": self.resolver_backend,
             "resolver_base_url": self.resolver_base_url,
             "resolver_model": self.resolver_model,

@@ -13,8 +13,14 @@ from ..models import (
     AnimeRequestKind,
     CharacterCredit,
     FetchedSource,
+    NewsCategory,
+    NewsReport,
+    NewsRequest,
+    NewsRequestKind,
+    NewsTimeScope,
     PlanningContext,
     QueryProposal,
+    Reference,
     RequestRoute,
     RouteDecision,
     SearchRequest,
@@ -57,6 +63,9 @@ class FakeResolverClient:
 
     def classify_anime_request(self, question: str) -> AnimeRequest:
         return AnimeRequest(AnimeRequestKind.LOOKUP, title_query=question, requested_fields=[AnimeField.DESCRIPTION])
+
+    def classify_news_request(self, question: str) -> NewsRequest:
+        return NewsRequest(NewsRequestKind.CATEGORY, NewsCategory.GENERAL, NewsTimeScope.LAST_24_HOURS)
 
     def refine_anime_title_queries(self, question: str, attempted_query: str) -> list[str]:
         return [attempted_query]
@@ -147,6 +156,37 @@ class FakeSearchClient:
 
     def doctor_check(self, live: bool = False) -> dict[str, object]:
         return {"status": "ok", "provider": "fake", "live": live}
+
+
+@dataclass(slots=True)
+class FakeNewsClient:
+    def get_news(self, request: NewsRequest, max_items: int) -> NewsReport:
+        references = [
+            Reference(
+                f"rss:{index}",
+                f"Story {index}",
+                f"https://example.com/story-{index}",
+                "Example Feed",
+                f"2026-06-15T0{index}:00:00-07:00",
+                None,
+                SourceKind.RSS_FEED,
+            )
+            for index in range(1, max_items + 1)
+        ]
+        lines = [
+            (
+                f"{index}. 2026-06-15 0{index}:00 PDT | Story {index} | Example summary {index}. | Example Feed"
+            )
+            for index in range(1, max_items + 1)
+        ]
+        return NewsReport(
+            summary="Latest general news.",
+            answer="\n".join(lines),
+            references=references,
+        )
+
+    def doctor_check(self, live: bool = False) -> dict[str, object]:
+        return {"status": "ok", "provider": "fake_news", "live": live}
 
 
 @dataclass(slots=True)
