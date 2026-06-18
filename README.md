@@ -228,10 +228,13 @@ content, and model output; do not publish them without reviewing their contents.
 
 ## Historian Integration
 
-Historian event production is optional and disabled by default. Magpie emits
-compact research lifecycle records after its normal durable transitions; it
-does not send fetched documents, answer prose, raw provider payloads, hidden
-model reasoning, or credentials.
+Historian event production is optional and disabled by default.
+[Historian](https://github.com/freebsdgirl/historian) is the event sink Magpie
+can publish to for research runs, routes, queries, sources, synthesis, and
+failure activity. Install `historian.manifest.json` with Historian, store the
+printed token in `MAGPIE_HISTORIAN_TOKEN`, and set
+`MAGPIE_HISTORIAN_ENABLED=true`. Historian delivery failures are logged but
+never change a successful research result into a failure.
 
 Install the bundled manifest from the Historian checkout:
 
@@ -239,13 +242,13 @@ Install the bundled manifest from the Historian checkout:
 historian app install /path/to/magpie/historian.manifest.json
 ```
 
-Store the printed token in `MAGPIE_HISTORIAN_TOKEN` or `historian_token`, then
-enable delivery with `MAGPIE_HISTORIAN_ENABLED=true`. The default endpoint is
-`http://127.0.0.1:8768`.
+The token may also be stored as `historian_token` in Magpie's configuration.
+The default endpoint is `http://127.0.0.1:8768`. Delivery retries connection
+failures and HTTP 5xx responses, but no durable client-side spool is created.
 
-Historian delivery retries connection failures and HTTP 5xx responses. Delivery
-failure is logged by Magpie but does not turn an otherwise successful research
-run into a domain failure. No durable client-side spool is created.
+Magpie emits compact lifecycle records after its normal durable transitions. It
+does not send fetched documents, answer prose, raw provider payloads, hidden
+model reasoning, or credentials.
 
 ## Development Notes
 
