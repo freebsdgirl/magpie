@@ -32,12 +32,13 @@ class AppContext:
     historian_sink: HistorianSink
 
 
-def build_app(config_path: str | None = None) -> AppContext:
+def build_app(config_path: str | None = None, *, truncate_debug_logs: bool = False) -> AppContext:
     settings = Settings.load(config_path)
-    for log_path in (settings.resolver_debug_log_path, settings.fetch_debug_log_path):
-        path = Path(log_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("", encoding="utf-8")
+    if truncate_debug_logs:
+        for log_path in (settings.resolver_debug_log_path, settings.fetch_debug_log_path):
+            path = Path(log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("", encoding="utf-8")
     storage = SQLiteStorage(settings.expanded_database_path)
     storage.initialize()
 

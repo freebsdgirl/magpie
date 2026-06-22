@@ -1103,5 +1103,5 @@ class ResearchService:
         with _FETCH_LOG_LOCK, path.open("a", encoding="utf-8", errors="backslashreplace") as handle:
             handle.write(f"=== {section} ===\nrun_id: {run_id}\n")
             for line in lines:
-                handle.write(f"{valid_unicode(line)}\n")
+                handle.write(f"{self._sanitize_event_data(line)}\n")
             handle.write("\n")

@@ -53,8 +53,6 @@ class OpenAICompatibleResolverClient:
 
     settings: Settings
     transport: httpx.BaseTransport | None = None
-    _current_run_id: str | None = None
-    _call_index: int = 0
     _local: threading.local = field(default_factory=threading.local)
 
     def route_request(self, question: str) -> RouteDecision:
@@ -507,14 +505,8 @@ class OpenAICompatibleResolverClient:
                 **self.reasoning_request_options(),
             }
             started = perf_counter()
-            self._append_debug_entry(
-                step=attempt_step,
-                system_prompt=system_prompt,
-                user_payload=user,
-                elapsed_ms=None,
-                response_status_code=None,
-                response_text=None,
-                error_text=None,
+            self._log_request_start(
+                step=attempt_step, system_prompt=system_prompt, user_payload=user,
             )
             response_json: dict[str, Any] | None = None
             try:
@@ -534,25 +526,15 @@ class OpenAICompatibleResolverClient:
                     response_json = response.json()
                 except ValueError:
                     response_json = None
-                self._append_debug_entry(
-                    step=attempt_step,
-                    system_prompt=system_prompt,
-                    user_payload=user,
+                self._log_request_response(
                     elapsed_ms=elapsed_ms,
                     response_status_code=response.status_code,
                     response_text=self._extract_response_content(response_json) or response_text,
-                    error_text=None,
                 )
             except httpx.HTTPError as exc:
                 elapsed_ms = round((perf_counter() - started) * 1000, 2)
-                self._append_debug_entry(
-                    step=attempt_step,
-                    system_prompt=system_prompt,
-                    user_payload=user,
-                    elapsed_ms=elapsed_ms,
-                    response_status_code=None,
-                    response_text=None,
-                    error_text=f"{type(exc).__name__}: {exc}",
+                self._log_request_error(
+                    elapsed_ms=elapsed_ms, error_text=f"{type(exc).__name__}: {exc}",
                 )
                 raise
             if response.status_code >= 400:
@@ -578,47 +560,59 @@ class OpenAICompatibleResolverClient:
             return valid_unicode_tree(parsed)
         raise ResolverError(f"Resolver returned malformed JSON: {last_content[:300]}")
 
-    def _append_debug_entry(
-        self,
-        *,
-        step: str,
-        system_prompt: str,
-        user_payload: Any,
-        elapsed_ms: float | None,
-        response_status_code: int | None,
-        response_text: str | None,
-        error_text: str | None,
+    def _redact(self, text: str) -> str:
+        """Strip configured secrets from text before writing debug logs."""
+        redacted = valid_unicode(text)
+        for secret in (
+            self.settings.search_api_key,
+            self.settings.resolver_api_key,
+            self.settings.historian_token,
+        ):
+            if secret:
+                redacted = redacted.replace(secret, "[REDACTED]")
+        return redacted
+
+    def _log_request_start(
+        self, *, step: str, system_prompt: str, user_payload: Any
     ) -> None:
         path = Path(self.settings.resolver_debug_log_path)
         if not path.parent.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
         with _DEBUG_LOG_LOCK, path.open("a", encoding="utf-8", errors="backslashreplace") as handle:
-            if elapsed_ms is None and response_text is None and error_text is None:
-                self._local.call_index = getattr(self._local, "call_index", 0) + 1
-                formatted_user_payload = self._format_user_payload(user_payload)
-                handle.write(f"=== Step {self._local.call_index}: {step} ===\n")
-                handle.write(f"run_id: {getattr(self._local, 'run_id', '')}\n")
-                handle.write(f"input_characters: {len(system_prompt) + len(formatted_user_payload)}\n")
-                handle.write("\nSYSTEM PROMPT\n")
-                handle.write(system_prompt.strip())
-                handle.write("\n\nUSER PAYLOAD\n")
-                handle.write(formatted_user_payload)
-                handle.write("\n\n")
-                return
+            self._local.call_index = getattr(self._local, "call_index", 0) + 1
+            formatted_user_payload = self._format_user_payload(user_payload)
+            handle.write(f"=== Step {self._local.call_index}: {step} ===\n")
+            handle.write(f"run_id: {getattr(self._local, 'run_id', '')}\n")
+            handle.write(f"input_characters: {len(system_prompt) + len(formatted_user_payload)}\n")
+            handle.write("\nSYSTEM PROMPT\n")
+            handle.write(self._redact(system_prompt.strip()))
+            handle.write("\n\nUSER PAYLOAD\n")
+            handle.write(self._redact(formatted_user_payload))
+            handle.write("\n\n")
 
-            if elapsed_ms is not None:
-                handle.write(f"elapsed_ms: {elapsed_ms}\n")
-            if response_status_code is not None:
-                handle.write(f"http_status: {response_status_code}\n")
-            if error_text is not None:
-                handle.write("\nERROR\n")
-                handle.write(error_text.strip())
-                handle.write("\n\n")
-                return
+    def _log_request_response(
+        self, *, elapsed_ms: float, response_status_code: int, response_text: str | None
+    ) -> None:
+        path = Path(self.settings.resolver_debug_log_path)
+        if not path.parent.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+        with _DEBUG_LOG_LOCK, path.open("a", encoding="utf-8", errors="backslashreplace") as handle:
+            handle.write(f"elapsed_ms: {elapsed_ms}\n")
+            handle.write(f"http_status: {response_status_code}\n")
             if response_text is not None and self.settings.resolver_include_raw_output:
                 handle.write("\nMODEL OUTPUT\n")
-                handle.write(response_text.strip())
+                handle.write(self._redact(response_text.strip()))
                 handle.write("\n\n")
+
+    def _log_request_error(self, *, elapsed_ms: float, error_text: str) -> None:
+        path = Path(self.settings.resolver_debug_log_path)
+        if not path.parent.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+        with _DEBUG_LOG_LOCK, path.open("a", encoding="utf-8", errors="backslashreplace") as handle:
+            handle.write(f"elapsed_ms: {elapsed_ms}\n")
+            handle.write("\nERROR\n")
+            handle.write(self._redact(error_text.strip()))
+            handle.write("\n\n")
 
     def _format_user_payload(self, payload: Any) -> str:
         if isinstance(payload, str):
@@ -672,14 +666,3 @@ class OpenAICompatibleResolverClient:
         if isinstance(value, dict):
             return any(self._payload_contains_control_artifacts(item) for item in value.values())
         return False
-
-    def _int_list(self, value: Any) -> list[int]:
-        if not isinstance(value, list):
-            return []
-        parsed: list[int] = []
-        for item in value:
-            try:
-                parsed.append(int(item))
-            except (TypeError, ValueError):
-                continue
-        return parsed
