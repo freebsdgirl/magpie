@@ -104,7 +104,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     app = None
     try:
         if args.command in {"serve", "doctor"}:
-            app = build_app(args.config_path)
+            app = build_app(args.config_path, truncate_debug_logs=(args.command == "serve"))
         if args.command == "serve":
             import uvicorn
 
