@@ -35,6 +35,9 @@ IMPERATIVE_SIGNALS = (
     "add ", "bake ", "combine ", "cover ", "fold ", "heat ", "knead ", "mix ",
     "place ", "preheat ", "rest ", "shape ", "stir ", "transfer ",
 )
+_QUANTITY_PATTERN = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:g|kg|ml|cup|cups|tsp|tbsp|minutes?|mins?|hours?|hrs?|°f|°c)\b"
+)
 _GLOBAL_RESOLVER_GATE = threading.BoundedSemaphore(1)
 _FETCH_LOG_LOCK = threading.Lock()
 LOGGER = logging.getLogger(__name__)
@@ -423,9 +426,9 @@ class ResearchService:
         with self._telemetry_lock:
             self._telemetry[run_id] = RunTelemetry(run_id, perf_counter(), started_event_id, freshness)
         budget = RunBudget(
-            queries_remaining=getattr(self.settings, "max_search_queries_per_run"),
-            sources_remaining=getattr(self.settings, "max_sources_per_run"),
-            evidence_remaining=getattr(self.settings, "max_evidence_items_per_run"),
+            queries_remaining=self.settings.max_search_queries_per_run,
+            sources_remaining=self.settings.max_sources_per_run,
+            evidence_remaining=self.settings.max_evidence_items_per_run,
         )
         evidence: list[EvidenceItem] = []
         seen_urls: set[str] = set()
@@ -479,7 +482,7 @@ class ResearchService:
                     )
                 budget.queries_remaining -= 1
                 query_id = self.storage.add_query(
-                    run_id, query, getattr(self.settings, "search_provider"), freshness
+                    run_id, query, self.settings.search_provider, freshness
                 )
                 self._set_stage(run_id, "search")
                 results, elapsed = self._search(run_id, proposal.query, freshness)
@@ -497,7 +500,7 @@ class ResearchService:
                             run_id, result_ids.get(result.url), result, canonical
                         )
                     if len(candidates) >= min(
-                        getattr(self.settings, "max_sources_per_query"), budget.sources_remaining
+                        self.settings.max_sources_per_query, budget.sources_remaining
                     ):
                         break
                 if not candidates:
@@ -505,6 +508,8 @@ class ResearchService:
                     continue
 
                 for result in candidates:
+                    if budget.evidence_remaining <= 0:
+                        break
                     self._raise_if_cancelled(run_id)
                     budget.sources_remaining -= 1
                     source_id, text, new_warnings, new_limitations, elapsed = self._acquire(
@@ -771,10 +776,12 @@ class ResearchService:
         references = report.references[: max(0, request.max_references)]
         self.storage.save_final_answer(run_id, report.summary, report.answer, references)
         self.storage.update_run_status(run_id, "completed", StopReason.SPECIALIZED_ROUTE.value)
+        # News references come from one batched RSS fetch; amortize the
+        # batch duration across references rather than overstating each.
+        news_elapsed = timings.get("news", [0.0])[-1]
+        per_source_elapsed = round(news_elapsed / len(references), 2) if references else 0.0
         for reference in references:
-            self._record_specialized_source(
-                run_id, reference, "rss", timings.get("news", [0.0])[-1]
-            )
+            self._record_specialized_source(run_id, reference, "rss", per_source_elapsed)
         self._record_run_finished(
             run_id,
             "research.run.completed",
@@ -811,7 +818,7 @@ class ResearchService:
         started = perf_counter()
         try:
             results = self.search_client.search(SearchRequest(
-                query, getattr(self.settings, "max_search_results_per_query"), freshness
+                query, self.settings.max_search_results_per_query, freshness
             ))
         except Exception as exc:
             self._record_operation_error(run_id, "search", "search", exc)
@@ -888,7 +895,7 @@ class ResearchService:
     ) -> EvidenceItem | None:
         if budget.evidence_remaining <= 0:
             return None
-        max_chars = getattr(self.settings, "max_evidence_characters_per_item")
+        max_chars = self.settings.max_evidence_characters_per_item
         chunks = [chunk.strip() for chunk in re.split(r"\n\s*\n|(?<=[.!?])\s+", text) if chunk.strip()]
         terms = set(re.findall(r"[a-z0-9]+", " ".join([question, *remaining_questions]).lower()))
         procedural = self._is_procedural(question)
@@ -900,7 +907,7 @@ class ResearchService:
             if procedural:
                 score += sum(3 for signal in ACTIONABLE_SECTION_SIGNALS if signal in lowered)
                 score += sum(2 for signal in IMPERATIVE_SIGNALS if signal in lowered)
-                score += min(4, len(re.findall(r"\b\d+(?:\.\d+)?\s*(?:g|kg|ml|cup|cups|tsp|tbsp|minutes?|mins?|hours?|hrs?|°f|°c)\b", lowered)))
+                score += min(4, len(_QUANTITY_PATTERN.findall(lowered)))
             link_count = chunk.count("](")
             if link_count >= 4:
                 score -= 20
@@ -913,7 +920,7 @@ class ResearchService:
         excerpt = "\n\n".join(chunk for _score, _index, chunk in selected)[:max_chars].strip()
         if not excerpt:
             return None
-        source_limit = min(max_chars, getattr(self.settings, "max_synthesis_input_characters"))
+        source_limit = min(max_chars, self.settings.max_synthesis_input_characters)
         budget.evidence_remaining -= 1
         return self.storage.add_evidence_item(run_id, source_id, excerpt[:source_limit], note)
 
@@ -932,10 +939,7 @@ class ResearchService:
         if step_count < 3 and imperative_count < 3:
             return "Find enough evidence to provide a concrete, ordered set of instructions."
         if any(signal in question.lower() for signal in RECIPE_SIGNALS):
-            quantities = re.findall(
-                r"\b\d+(?:\.\d+)?\s*(?:g|kg|ml|cup|cups|tsp|tbsp|minutes?|mins?|hours?|hrs?|°f|°c)\b",
-                lowered,
-            )
+            quantities = _QUANTITY_PATTERN.findall(lowered)
             if len(quantities) < 4:
                 return "Find a complete recipe with ingredient quantities, timings, and baking temperature."
         return None
@@ -975,7 +979,7 @@ class ResearchService:
         prior_draft: SynthesisDraft | None, timings: dict[str, list[float]],
     ) -> SynthesisDraft:
         self._raise_if_cancelled(run_id)
-        max_chars = getattr(self.settings, "max_synthesis_input_characters")
+        max_chars = self.settings.max_synthesis_input_characters
         bounded = EvidenceItem(
             evidence.evidence_id, evidence.source_id, evidence.excerpt[:max_chars], evidence.note
         )
@@ -1070,14 +1074,14 @@ class ResearchService:
             raise ResearchCancelled("Run was cancelled before completion.")
 
     def _min_fetched_at(self, freshness: FreshnessClass) -> str:
-        ttl = getattr(self.settings, "cache_recent_ttl_seconds" if freshness == FreshnessClass.RECENT else "cache_evergreen_ttl_seconds")
+        ttl = self.settings.cache_recent_ttl_seconds if freshness == FreshnessClass.RECENT else self.settings.cache_evergreen_ttl_seconds
         return (datetime.now(UTC) - timedelta(seconds=ttl)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     def _record_timing(self, timings: dict[str, list[float]], key: str, elapsed: float) -> None:
         timings.setdefault(key, []).append(elapsed)
 
     def _build_debug(self, run_id: str, request: ResearchRequest, timings: dict[str, list[float]]) -> dict[str, object] | None:
-        if request.response_detail != ResponseDetail.DEBUG and not getattr(self.settings, "include_timing_debug", False):
+        if request.response_detail != ResponseDetail.DEBUG and not self.settings.include_timing_debug:
             return None
         payload: dict[str, object] = {
             "reasoning_options": self.resolver.reasoning_request_options(),
@@ -1094,7 +1098,7 @@ class ResearchService:
         self._trace(run_id, "RUN STARTED", [f"question: {question}"])
 
     def _trace(self, run_id: str, section: str, lines: list[str]) -> None:
-        path = Path(getattr(self.settings, "fetch_debug_log_path"))
+        path = Path(self.settings.fetch_debug_log_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with _FETCH_LOG_LOCK, path.open("a", encoding="utf-8", errors="backslashreplace") as handle:
             handle.write(f"=== {section} ===\nrun_id: {run_id}\n")
