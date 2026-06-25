@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import threading
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 
 from magpie.config import Settings
@@ -34,7 +35,7 @@ from magpie.models import (
 )
 from magpie.providers.fake import FakeFetcher, FakeResolverClient, FakeSearchClient
 from magpie.a2a import build_fastapi_app, build_sdk_server
-from magpie.service import ResearchService
+from magpie.service import ResearchService, detect_freshness_class
 from magpie.storage import SQLiteStorage
 
 
@@ -835,6 +836,29 @@ class ServiceTests(unittest.TestCase):
             self.assertIn("request_handler", server_bits)
             self.assertGreater(len(app.routes), 0)
             service.storage.close()
+
+
+class FreshnessDetectionTests(unittest.TestCase):
+    def test_future_year_is_not_recent(self) -> None:
+        self.assertEqual(detect_freshness_class("events in 2099"), FreshnessClass.EVERGREEN)
+
+    def test_current_year_is_recent(self) -> None:
+        current_year = datetime.now(UTC).year
+        self.assertEqual(
+            detect_freshness_class(f"news from {current_year}"), FreshnessClass.RECENT
+        )
+
+    def test_last_year_is_recent(self) -> None:
+        last_year = datetime.now(UTC).year - 1
+        self.assertEqual(
+            detect_freshness_class(f"summary of {last_year}"), FreshnessClass.RECENT
+        )
+
+    def test_recent_signal_words_are_recent(self) -> None:
+        self.assertEqual(detect_freshness_class("what happened today"), FreshnessClass.RECENT)
+
+    def test_evergreen_questions_are_evergreen(self) -> None:
+        self.assertEqual(detect_freshness_class("how to bake sourdough bread"), FreshnessClass.EVERGREEN)
 
 
 if __name__ == "__main__":
