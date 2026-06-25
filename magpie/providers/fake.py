@@ -29,6 +29,7 @@ from ..models import (
     SourceKind,
     SynthesisDraft,
 )
+from .base import reasoning_request_options
 
 
 def _tokens(text: str) -> set[str]:
@@ -41,16 +42,6 @@ def _tokens(text: str) -> set[str]:
 
 def _overlap_score(left: str, right: str) -> int:
     return len(_tokens(left) & _tokens(right))
-
-
-def reasoning_request_options(include_reasoning: bool) -> dict[str, object]:
-    """Mirror the resolver reasoning toggle contract from the design notes."""
-    effort = "medium" if include_reasoning else "none"
-    return {
-        "think": include_reasoning,
-        "reasoning_effort": effort,
-        "reasoning": {"effort": effort},
-    }
 
 
 @dataclass(slots=True)

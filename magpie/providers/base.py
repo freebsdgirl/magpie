@@ -26,6 +26,16 @@ from ..models import (
 )
 
 
+def reasoning_request_options(include_reasoning: bool) -> dict[str, object]:
+    """Build the reasoning-effort payload sent to OpenAI-compatible resolvers."""
+    effort = "medium" if include_reasoning else "none"
+    return {
+        "think": include_reasoning,
+        "reasoning_effort": effort,
+        "reasoning": {"effort": effort},
+    }
+
+
 class ResolverClient(Protocol):
     def route_request(self, question: str) -> RouteDecision: ...
 

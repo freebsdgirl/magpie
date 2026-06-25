@@ -29,22 +29,13 @@ from ..models import (
     QueryProposal,
     RequestRoute,
     RouteDecision,
-    RunBudget,
     SynthesisDraft,
     WeatherKind,
 )
 from ..text import valid_unicode, valid_unicode_tree
+from .base import reasoning_request_options
 
 _DEBUG_LOG_LOCK = threading.Lock()
-
-def reasoning_request_options(include_reasoning: bool) -> dict[str, object]:
-    """Mirror the resolver reasoning toggle contract from the design notes."""
-    effort = "medium" if include_reasoning else "none"
-    return {
-        "think": include_reasoning,
-        "reasoning_effort": effort,
-        "reasoning": {"effort": effort},
-    }
 
 
 @dataclass(slots=True)
@@ -280,9 +271,7 @@ class OpenAICompatibleResolverClient:
         allowed = {item.character_name for item in credits}
         return selected if isinstance(selected, str) and selected in allowed else None
 
-    def propose_query(self, question: str, context: PlanningContext | list[str]) -> QueryProposal:
-        if isinstance(context, list):
-            context = PlanningContext(context, [], [], RunBudget(1, 1, 1))
+    def propose_query(self, question: str, context: PlanningContext) -> QueryProposal:
         payload = self._ask_json(
             "propose_query",
             system=(
