@@ -64,8 +64,9 @@ def detect_freshness_class(question: str) -> FreshnessClass:
     lowered = question.lower()
     if any(signal in lowered for signal in RECENT_SIGNALS):
         return FreshnessClass.RECENT
+    current_year = datetime.now(UTC).year
     years = {int(value) for value in re.findall(r"\b20\d{2}\b", question)}
-    if any(year >= datetime.now(UTC).year - 1 for year in years):
+    if any(current_year - 1 <= year <= current_year for year in years):
         return FreshnessClass.RECENT
     return FreshnessClass.EVERGREEN
 
