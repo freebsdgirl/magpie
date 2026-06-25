@@ -63,6 +63,7 @@ class NewsRSSClient:
         self._feeds = self._load_registry()
         self._cache: dict[str, tuple[float, list[NewsItem]]] = {}
         self._cache_lock = Lock()
+        self._request_tz = self._local_tz
 
     @property
     def _local_tz(self):
@@ -74,6 +75,11 @@ class NewsRSSClient:
             raise NewsError("Unsupported news request.")
         if max_items <= 0:
             return self._no_results_report(request, [])
+
+        # Resolve the local timezone once per request so every time-window
+        # calculation, future-date check, and formatting call sees the same
+        # tzinfo, even if a DST transition occurs mid-request.
+        self._request_tz = self._local_tz
 
         category_feeds = [feed for feed in self._feeds if request.category in feed.categories]
         if not category_feeds:
@@ -106,7 +112,7 @@ class NewsRSSClient:
         discarded_future = 0
         for item in fetched_items:
             published = self._parse_iso(item.published_at)
-            if published > datetime.now(self._local_tz) + timedelta(minutes=1):
+            if published > datetime.now(self._request_tz) + timedelta(minutes=1):
                 discarded_future += 1
                 continue
             if started_at <= published <= ended_at:
@@ -247,7 +253,7 @@ class NewsRSSClient:
                     title=title,
                     url=url,
                     source_name=feed_name,
-                    published_at=published.astimezone(self._local_tz).isoformat(),
+                    published_at=published.astimezone(self._request_tz).isoformat(),
                     summary=summary,
                     category=category,
                 )
@@ -346,7 +352,7 @@ class NewsRSSClient:
         return selected
 
     def _time_window(self, scope: NewsTimeScope) -> tuple[datetime, datetime]:
-        now = datetime.now(self._local_tz)
+        now = datetime.now(self._request_tz)
         if scope == NewsTimeScope.TODAY:
             start = now.replace(hour=0, minute=0, second=0, microsecond=0)
             return start, now
@@ -373,11 +379,10 @@ class NewsRSSClient:
 
     def _format_local_time(self, value: str) -> str:
         dt = self._parse_iso(value)
-        hour = dt.hour % 12 or 12
-        return dt.strftime(f"%Y-%m-%d {hour}:%M %p %Z")
+        return dt.strftime("%Y-%m-%d %-I:%M %p %Z")
 
     def _parse_iso(self, value: str) -> datetime:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(self._local_tz)
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(self._request_tz)
 
     def _cache_get(self, feed_id: str) -> list[NewsItem] | None:
         if self.settings.news_cache_ttl_seconds == 0:

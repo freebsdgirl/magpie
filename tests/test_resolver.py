@@ -15,13 +15,13 @@ from magpie.models import (
     NewsCategory,
     NewsRequestKind,
     NewsTimeScope,
+    PlanningContext,
     RequestRoute,
+    RunBudget,
     WeatherKind,
 )
-from magpie.providers.openai_compatible import (
-    OpenAICompatibleResolverClient,
-    reasoning_request_options,
-)
+from magpie.providers.openai_compatible import OpenAICompatibleResolverClient
+from magpie.providers.base import reasoning_request_options
 
 
 class OpenAICompatibleResolverTests(unittest.TestCase):
@@ -292,7 +292,10 @@ class OpenAICompatibleResolverTests(unittest.TestCase):
                 settings=self._settings(tmpdir),
                 transport=httpx.MockTransport(handler),
             )
-            proposal = client.propose_query("who is the mayor of seattle", ["old query"])
+            proposal = client.propose_query(
+                "who is the mayor of seattle",
+                PlanningContext(["old query"], [], [], RunBudget(1, 1, 1)),
+            )
 
         self.assertEqual(proposal.query, "current mayor of Seattle")
         user_payload = json.loads(captured_payloads[0]["messages"][1]["content"])
@@ -544,7 +547,7 @@ class OpenAICompatibleResolverTests(unittest.TestCase):
                 transport=httpx.MockTransport(handler),
             )
             client.begin_request_debug_log("run-123", "question")
-            client.propose_query("question", [])
+            client.propose_query("question", PlanningContext([], [], [], RunBudget(1, 1, 1)))
             content = log_path.read_text(encoding="utf-8")
 
         self.assertIn("http_status: 200", content)
