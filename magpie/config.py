@@ -72,6 +72,7 @@ class Settings:
     resolver_api_key: str = "your-openai-compatible-key"
     resolver_include_reasoning: bool = False
     resolver_include_raw_output: bool = False
+    resolver_max_tokens: int = 8192
     resolver_debug_log_path: str = "~/.local/share/magpie/magpie-resolver.log"
     fetch_debug_log_path: str = "~/.local/share/magpie/magpie-fetch.log"
     include_timing_debug: bool = False
@@ -256,6 +257,7 @@ class Settings:
             "resolver_model": self.resolver_model,
             "resolver_include_reasoning": self.resolver_include_reasoning,
             "resolver_include_raw_output": self.resolver_include_raw_output,
+            "resolver_max_tokens": self.resolver_max_tokens,
             "resolver_debug_log_path": self.resolver_debug_log_path,
             "fetch_debug_log_path": self.fetch_debug_log_path,
             "include_timing_debug": self.include_timing_debug,

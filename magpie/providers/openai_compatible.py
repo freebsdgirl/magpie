@@ -508,6 +508,7 @@ class OpenAICompatibleResolverClient:
             payload = {
                 "model": self.settings.resolver_model,
                 "messages": messages,
+                "max_tokens": self.settings.resolver_max_tokens,
                 "response_format": {
                     "type": "json_schema",
                     "json_schema": {
