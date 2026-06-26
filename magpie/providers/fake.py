@@ -87,26 +87,11 @@ class FakeResolverClient:
                 remaining_questions=["What evidence answers the question?"],
                 source_answers_question=False,
             )
-        best = evidence[0]
+        cited = [*(prior_draft.cited_source_ids if prior_draft else []), *[item.source_id for item in evidence]]
         return SynthesisDraft(
             summary=f"Grounded answer for: {question}",
-            answer=best.excerpt,
-            cited_source_ids=[*(prior_draft.cited_source_ids if prior_draft else []), best.source_id],
-            remaining_questions=[],
-        )
-
-    def compose(
-        self,
-        question: str,
-        evidence: list[EvidenceItem],
-        prior_draft: SynthesisDraft,
-    ) -> SynthesisDraft:
-        if not evidence:
-            return prior_draft
-        return SynthesisDraft(
-            summary=prior_draft.summary or f"Composed answer for: {question}",
-            answer=prior_draft.answer,
-            cited_source_ids=list(prior_draft.cited_source_ids),
+            answer=evidence[0].excerpt,
+            cited_source_ids=list(dict.fromkeys(cited)),
             remaining_questions=[],
         )
 
