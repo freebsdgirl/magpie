@@ -335,7 +335,7 @@ class OpenAICompatibleResolverClient:
         system = (
             "Answer the question using all provided sources. Return compact JSON only. "
             "Write a thorough, self-contained answer in plain English markdown with real newline characters. "
-            "The answer must be at least three paragraphs long. Start with a background paragraph that "
+            "The answer must be exactly three paragraphs long. Start with a background paragraph that "
             "introduces the topic and why it matters. Then write one or more paragraphs covering key "
             "components and how it works, using specific details from the sources. End with a paragraph "
             "on implications or practical use. Never write a single-paragraph answer. "
