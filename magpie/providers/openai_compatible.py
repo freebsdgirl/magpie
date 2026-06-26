@@ -352,13 +352,9 @@ class OpenAICompatibleResolverClient:
         )
         if explanatory:
             system += (
-                " This is an explanatory request. The answer must be exactly 3 to 7 paragraphs long. "
-                "Start with a background paragraph that introduces the topic and why it matters. "
-                "Then write one or more paragraphs covering key components and how it works, using specific details from the sources. "
-                "End with a paragraph on implications or practical use. Use as many paragraphs as the topic warrants "
-                "within that range, but never fewer than 3 or more than 7. Never write a single-paragraph answer. "
-                "Gather complementary facets before setting remaining_questions to []. If the sources cover only "
-                "part of the topic, list the missing facets in remaining_questions so further sources can be gathered."
+                " This is an explanatory request. Write an essay using the provided sources, "
+                "not a brief answer. If the sources cover only part of the topic, list the missing "
+                "facets in remaining_questions so further sources can be gathered."
             )
         if procedural:
             system += (
