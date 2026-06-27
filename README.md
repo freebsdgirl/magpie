@@ -19,8 +19,8 @@ Magpie keeps that work inside a dedicated information-retrieval agent:
 - The upstream agent delegates a plain-language question.
 - A small routing decision chooses general web research or a specialized path.
 - Deterministic code handles provider calls, budgets, caching, and validation.
-- The resolver receives narrow decisions and one source at a time rather than a
-  pile of competing excerpts.
+- The resolver receives all gathered evidence at once per round, not one source
+  at a time.
 - The upstream agent receives a grounded answer and references, then applies
   personality or continues the conversation.
 
@@ -31,12 +31,14 @@ without drowning in context.
 ## What It Does
 
 - answers natural-language questions using web search and fetched pages
-- returns compact answers with grounded references
-- checks sources incrementally until the answer is usable or a run budget ends
+- returns essay-style answers for explanatory questions with grounded references
+- gathers multiple sources per research round and synthesizes them in one call
 - routes current-condition and forecast requests to the Neon Hail weather API
 - answers anime facts, Japanese voice-cast questions, and local-time airing
   schedules through AniList
 - returns compact category news digests from publisher RSS and Atom feeds
+- exposes indexed search results without synthesis via the magpie_search skill
+- fetches web page content by index or URL via the magpie_fetch skill
 - caches useful source snapshots and completed answers in SQLite
 - exposes durable, cancellable ask runs through A2A
 - records resolver, fetch, timing, and run diagnostics for debugging
@@ -115,6 +117,21 @@ magpie ask "world news from yesterday" --json
 magpie ask "Compare the latest policies" --json --debug
 ```
 
+Search the web and get indexed results with summaries:
+
+```bash
+magpie search "a2a protocol"
+magpie search "rust borrow checker" --max-results 3 --json
+```
+
+Fetch web page content by index or URL:
+
+```bash
+magpie fetch 0 --run-id <run_id_from_search>
+magpie fetch "https://example.com/article"
+magpie fetch 2 --run-id <run_id> --full
+```
+
 Other useful commands:
 
 ```bash
@@ -128,15 +145,36 @@ silently retry a request after the A2A server has accepted it.
 
 ## A2A Usage
 
-The intended integration path is plain-language delegation. An upstream agent
-only needs to know that Magpie accepts information requests and returns a
-structured result containing:
+Magpie exposes three skills on its agent card:
+
+### magpie_ask
+
+Synthesizes a grounded answer from web search. Sends `skill: "magpie_ask"`
+(or omit the skill — it is the default). Returns:
 
 - `summary`: a compact tool-friendly description
-- `answer`: the grounded answer
+- `answer`: the grounded answer (essay-style for explanatory questions)
 - `references`: sources used by the answer
 - `warnings` and `limitations`: relevant caveats
 - `status`, `stop_reason`, and `run_id`: execution state
+
+### magpie_search
+
+Returns indexed search results with short summaries and source URLs. No
+model synthesis. Sends `skill: "magpie_search"`. Returns:
+
+- `run_id`: used for follow-up fetch calls
+- `query`: the refined search query
+- `results`: array of `{ index, title, url, site_name, published_at, summary }`
+
+### magpie_fetch
+
+Retrieves full web page content by index (from a prior search) or by URL.
+Sends `skill: "magpie_fetch"` with either an index + `run_id` in metadata,
+or a URL. By default returns stored Exa content (instant); set `full: true`
+in metadata to force a fresh crawl4ai fetch. Returns:
+
+- `run_id`, `index`, `url`, `title`, `content`, `fetched_via`, `warnings`
 
 Published endpoints include:
 
@@ -165,19 +203,18 @@ RSS or Atom feeds without article fetching or synthesis. Arbitrary topics such
 as company-specific news fall back to general web research. If a specialized
 route fails, Magpie falls back to general web research.
 
-General web lookup follows a bounded incremental loop:
+General web lookup follows a bounded batch loop:
 
 1. Reuse fresh, previously accepted sources for the exact question when available.
 2. Ask the resolver for one focused search query.
-3. Search, deduplicate canonical URLs, and fetch a limited source set.
-4. Present one bounded source extract to the resolver.
-5. Keep the source only if the resolver says it contributes to the answer.
-6. Continue with the next source or query only when questions remain.
+3. Search, deduplicate canonical URLs, and gather a limited source set.
+4. Use Exa inline content directly when available; fall back to Crawl4AI only
+   when inline content is absent or too short.
+5. Pass all evidence from the round to the resolver in one synthesis call.
+6. Continue with the next query only when questions remain.
 
-The resolver never receives every result at once. Each synthesis call sees one
-new source plus a bounded prior draft. Resolver calls are also serialized across
-concurrent runs because the expected deployment target is a smaller local model,
-not a high-throughput frontier API.
+Resolver calls are serialized across concurrent runs because the expected
+deployment target is a smaller local model, not a high-throughput frontier API.
 
 Each research round gathers multiple sources before synthesizing. The resolver
 receives all evidence items from the round at once, along with any prior draft,
@@ -218,6 +255,7 @@ incremental answer size. The principal settings are:
 - `max_evidence_characters_per_item`
 - `max_synthesis_input_characters`
 - `max_incremental_answer_characters`
+- `resolver_max_tokens`
 
 Completed answers return `status: "ok"`. Grounded answers that stop before all
 remaining questions are resolved return `status: "partial"`. Runs without a
