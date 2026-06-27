@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from magpie.config import Settings
-from magpie.errors import FetchError
+from magpie.errors import FetchError, SearchError
 from magpie.models import (
     AnimeCandidate,
     AnimeField,
@@ -29,6 +29,7 @@ from magpie.models import (
     RouteDecision,
     SearchResultRecord,
     SourceKind,
+    StopReason,
     SynthesisDraft,
     WeatherKind,
     WeatherReport,
@@ -982,6 +983,123 @@ class ServiceTests(unittest.TestCase):
                 ).fetchone()[0]
             self.assertEqual(queries, 0)
             self.assertEqual(sources, 0)
+
+    def test_unexpected_exception_yields_internal_error_terminal(self) -> None:
+        """A non-domain exception (logic bug) must surface as a distinct
+        INTERNAL_ERROR terminal rather than being indistinguishable from a
+        provider failure (issue #41).
+        """
+
+        class ExplodingSynthesisResolver(FakeResolverClient):
+            def synthesize(self, question, evidence, prior_draft=None):
+                raise RuntimeError("simulated logic bug")
+
+        class TwoResultSearch(FakeSearchClient):
+            def search(self, request):
+                return [
+                    SearchResultRecord("One", "https://example.com/one", "one", provider="fake"),
+                ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = self._service(
+                tmpdir,
+                resolver=ExplodingSynthesisResolver(),
+                search_client=TwoResultSearch(),
+            )
+            result = service.research(ResearchRequest(question="question"))
+
+            self.assertEqual(result.status, "error")
+            self.assertEqual(result.stop_reason, StopReason.INTERNAL_ERROR)
+            self.assertIn("simulated logic bug", result.message)
+            run = service.storage.get_run(result.run_id)
+            self.assertEqual(run["status"], "failed")
+            self.assertEqual(run["stop_reason"], StopReason.INTERNAL_ERROR.value)
+            service.storage.close()
+
+    def test_domain_error_yields_failed_terminal_not_internal_error(self) -> None:
+        """A provider/domain failure must finalize as FAILED, not INTERNAL_ERROR,
+        so the two remain distinguishable (issue #41).
+        """
+
+        class FailingSearch(FakeSearchClient):
+            def search(self, request):
+                raise SearchError("provider down")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = self._service(
+                tmpdir,
+                search_client=FailingSearch(),
+            )
+            result = service.research(ResearchRequest(question="question"))
+
+            self.assertEqual(result.status, "error")
+            self.assertEqual(result.stop_reason, StopReason.FAILED)
+            self.assertIn("provider down", result.message)
+            run = service.storage.get_run(result.run_id)
+            self.assertEqual(run["stop_reason"], StopReason.FAILED.value)
+            service.storage.close()
+
+    def test_routing_non_domain_error_propagates_instead_of_fallback(self) -> None:
+        """A non-domain error inside a specialized route must not be silently
+        swallowed into a web-research fallback (issue #41). It propagates out
+        of the routing layer; the research outer handler then finalizes the run
+        as a normal FAILED terminal (StorageError is a domain error there), not
+        as a silent fallback.
+        """
+        from magpie.errors import StorageError
+
+        class StorageErrorResolver(FakeResolverClient):
+            def route_request(self, question):
+                raise StorageError("storage unavailable")
+
+        class FailingSearch(FakeSearchClient):
+            def search(self, request):
+                raise AssertionError("routing storage error must not fall back to web research")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = self._service(
+                tmpdir,
+                resolver=StorageErrorResolver(),
+                search_client=FailingSearch(),
+                weather_client=FakeWeatherClient(),
+            )
+            result = service.research(ResearchRequest(question="weather for 98230"))
+
+            # Not silently swallowed into web research: the failing search was
+            # never reached because the storage error propagated out of routing.
+            self.assertEqual(result.status, "error")
+            self.assertEqual(result.stop_reason, StopReason.FAILED)
+            self.assertIn("storage unavailable", result.message)
+            service.storage.close()
+
+    def test_routing_resolver_error_falls_back_to_web_research(self) -> None:
+        """A resolver (domain) error during routing still falls back to web
+        research; only the catch set changed, not the fallback behavior.
+        """
+        from magpie.errors import ResolverError
+
+        class ResolverErrorRouting(FakeResolverClient):
+            def route_request(self, question):
+                raise ResolverError("resolver returned junk")
+
+        class OneResultSearch(FakeSearchClient):
+            def search(self, request):
+                return [SearchResultRecord("One", "https://example.com/one", "one", provider="fake")]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = self._service(
+                tmpdir,
+                resolver=ResolverErrorRouting(),
+                search_client=OneResultSearch(),
+                weather_client=FakeWeatherClient(),
+            )
+            result = service.research(ResearchRequest(question="weather for 98230"))
+
+            # Fell back to web research rather than propagating.
+            self.assertNotEqual(result.stop_reason, StopReason.INTERNAL_ERROR)
+            run = service.storage.get_run(result.run_id)
+            self.assertNotEqual(run["stop_reason"], StopReason.INTERNAL_ERROR.value)
+            service.storage.close()
 
 
 class FreshnessDetectionTests(unittest.TestCase):

@@ -6,12 +6,13 @@ import logging
 import re
 import threading
 import uuid
+import httpx
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Any
 
-from .errors import FetchError, ResearchCancelled, ResolverError
+from .errors import FetchError, ResearchCancelled, ResolverError, SearchError, StorageError
 from .config import Settings
 from .historian import HistorianSink, NullHistorianSink, build_event
 from .models import (
@@ -53,6 +54,15 @@ _MEASUREMENT_PATTERN = re.compile(
 _GLOBAL_RESOLVER_GATE = threading.BoundedSemaphore(1)
 _FETCH_LOG_LOCK = threading.Lock()
 LOGGER = logging.getLogger(__name__)
+
+# Exceptions that represent expected, provider/infrastructure-level failures of
+# a research run. They finalize the run as a normal (terminal) failure rather
+# than an internal bug. `httpx.HTTPError` is included because the resolver
+# adapter intentionally re-raises network errors (e.g. timeouts) from
+# `_ask_json`; those are provider failures, not programming bugs.
+_DOMAIN_RUN_ERRORS: tuple[type[BaseException], ...] = (
+    ResolverError, SearchError, FetchError, StorageError, httpx.HTTPError,
+)
 
 
 @dataclass(slots=True)
@@ -580,24 +590,49 @@ class ResearchService:
                     },
                 )
             return ResearchErrorResult("error", run_id, "research", str(exc), StopReason.CANCELLED)
+        except _DOMAIN_RUN_ERRORS as exc:
+            return self._finish_run_failure(run_id, request, timings, exc, StopReason.FAILED)
         except Exception as exc:  # noqa: BLE001
-            self.storage.update_run_status(run_id, "failed", StopReason.FAILED.value)
-            self.storage.append_event(run_id, "run_failed", {"error": str(exc)})
-            telemetry = self._get_telemetry(run_id)
-            if telemetry is None or not telemetry.operation_error_recorded:
-                stage = self._stage(run_id)
-                self._record_operation_error(run_id, stage, stage, exc)
-            self._record_run_finished(
-                run_id, "research.run.failed", "error", StopReason.FAILED, timings,
-                error_type=exc.__class__.__name__, error_message=str(exc),
-            )
-            return ResearchErrorResult(
-                "error", run_id, "research", str(exc), StopReason.FAILED,
-                debug=self._build_debug(run_id, request, timings),
-            )
+            # Unexpected (non-domain) exception: a logic bug, storage failure, or
+            # other programming error. Surface it as a distinct internal-error
+            # terminal so it is distinguishable from provider failures, while
+            # still honoring the durable-run contract (finalize + return a result).
+            LOGGER.exception("Internal error during research run %s", run_id)
+            return self._finish_run_failure(run_id, request, timings, exc, StopReason.INTERNAL_ERROR)
         finally:
             with self._telemetry_lock:
                 self._telemetry.pop(run_id, None)
+
+    def _finish_run_failure(
+        self,
+        run_id: str,
+        request: ResearchRequest,
+        timings: dict[str, list[float]],
+        exc: BaseException,
+        reason: StopReason,
+    ) -> ResearchErrorResult:
+        """Finalize a failed run and return its error result.
+
+        Used by both the domain-failure (``FAILED``) and internal-error
+        (``INTERNAL_ERROR``) terminal paths so both honor the durable-run
+        contract: update run status, append a failure event, record the
+        operation error if it was not already attributed, and emit the
+        ``research.run.failed`` terminal with the exception's type/message.
+        """
+        self.storage.update_run_status(run_id, "failed", reason.value)
+        self.storage.append_event(run_id, "run_failed", {"error": str(exc)})
+        telemetry = self._get_telemetry(run_id)
+        if telemetry is None or not telemetry.operation_error_recorded:
+            stage = self._stage(run_id)
+            self._record_operation_error(run_id, stage, stage, exc)
+        self._record_run_finished(
+            run_id, "research.run.failed", "error", reason, timings,
+            error_type=exc.__class__.__name__, error_message=str(exc),
+        )
+        return ResearchErrorResult(
+            "error", run_id, "research", str(exc), reason,
+            debug=self._build_debug(run_id, request, timings),
+        )
 
     def search(self, query: str, *, max_results: int = 5, run_id: str | None = None) -> IndexedSearchResult:
         freshness = detect_freshness_class(query)
@@ -653,8 +688,16 @@ class ResearchService:
                 self.storage.update_run_status(run_id, "completed", StopReason.NEEDED_NEW_SEARCH.value)
                 self._trace(run_id, "SEARCH COMPLETED", [f"result_count: {len(items)}"])
                 return IndexedSearchResult(run_id=run_id, query=proposal.query, results=items, warnings=warnings)
-        except Exception as exc:  # noqa: BLE001
+        except _DOMAIN_RUN_ERRORS as exc:
             self.storage.update_run_status(run_id, "failed", StopReason.FAILED.value)
+            self.storage.append_event(run_id, "run_failed", {"error": str(exc)})
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # Unexpected (non-domain) failure: finalize as an internal error so it
+            # is distinguishable from provider failures, then re-raise to keep
+            # search()'s "raise on failure" contract intact for callers.
+            LOGGER.exception("Internal error during search run %s", run_id)
+            self.storage.update_run_status(run_id, "failed", StopReason.INTERNAL_ERROR.value)
             self.storage.append_event(run_id, "run_failed", {"error": str(exc)})
             raise
 

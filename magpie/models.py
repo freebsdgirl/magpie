@@ -27,6 +27,7 @@ class StopReason(str, Enum):
     NO_PROGRESS = "no_progress"
     CANCELLED = "cancelled"
     FAILED = "failed"
+    INTERNAL_ERROR = "internal_error"
 
 
 class SourceKind(str, Enum):

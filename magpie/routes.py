@@ -11,7 +11,9 @@ from __future__ import annotations
 from time import perf_counter
 from typing import TYPE_CHECKING
 
-from .errors import AnimeError, NewsError, ResearchCancelled, WeatherError
+import httpx
+
+from .errors import AnimeError, NewsError, ResearchCancelled, ResolverError, WeatherError
 from .models import (
     AnimeReport,
     AnimeRequestKind,
@@ -46,7 +48,11 @@ def try_specialized_route(
             f"zip_code: {decision.zip_code or ''}",
             f"elapsed_ms: {elapsed}",
         ])
-    except Exception as exc:  # noqa: BLE001
+    except (ResolverError, httpx.HTTPError) as exc:
+        # Resolver failures (malformed responses or network errors) are an
+        # expected, recoverable condition: fall back to web research. Other
+        # exceptions (StorageError, programming bugs) propagate so they are not
+        # silently swallowed.
         service._record_operation_error(run_id, "resolver", "route_request", exc)
         warnings.append(f"Request routing failed; used web research instead: {exc}")
         service._trace(run_id, "REQUEST ROUTING FALLBACK", [f"error: {exc}"])
@@ -72,6 +78,8 @@ def try_specialized_route(
         report = service.weather_client.get_weather(
             decision.zip_code, decision.weather_kind or WeatherKind.CONDITIONS
         )
+    except ResearchCancelled:
+        raise
     except WeatherError as exc:
         service._record_operation_error(run_id, "weather", "get_weather", exc)
         warnings.append(f"Specialized weather lookup failed; used web research instead: {exc}")
@@ -181,7 +189,10 @@ def try_anime_route(
         service._record_timing(timings, "anime", round((perf_counter() - started) * 1000, 2))
     except ResearchCancelled:
         raise
-    except Exception as exc:  # noqa: BLE001
+    except (ResolverError, AnimeError, httpx.HTTPError) as exc:
+        # Specialized-lookup failures (resolver, AniList, or network) fall back
+        # to web research. Other exceptions (StorageError, programming bugs)
+        # propagate so they are not silently swallowed.
         service._record_operation_error(run_id, "anime", "specialized_lookup", exc)
         warnings.append(f"Specialized anime lookup failed; used web research instead: {exc}")
         service._trace(run_id, "ANIME ROUTE FALLBACK", [f"error: {exc}"])
@@ -235,7 +246,12 @@ def try_news_route(
         started = perf_counter()
         report = service.news_client.get_news(news_request, service.settings.news_digest_size)
         service._record_timing(timings, "news", round((perf_counter() - started) * 1000, 2))
-    except NewsError as exc:
+    except ResearchCancelled:
+        raise
+    except (ResolverError, NewsError, httpx.HTTPError) as exc:
+        # Specialized-news failures (resolver classify, RSS fetch, or network)
+        # fall back to web research. Other exceptions (StorageError, programming
+        # bugs) propagate so they are not silently swallowed.
         service._record_operation_error(run_id, "news", "get_news", exc)
         warnings.append(f"Specialized news lookup failed; used web research instead: {exc}")
         service._trace(run_id, "NEWS ROUTE FALLBACK", [f"error: {exc}"])
