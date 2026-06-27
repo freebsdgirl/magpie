@@ -18,7 +18,7 @@ from .models import EvidenceItem, FreshnessClass, Reference, SourceKind, StopRea
 from .text import valid_unicode, valid_unicode_tree
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 TRACKING_QUERY_PARAMS = {
     "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "gclid", "fbclid",
 }
@@ -108,13 +108,14 @@ class SQLiteStorage:
         run_label = valid_unicode(run_label) if run_label is not None else None
         run_id = run_id or str(uuid.uuid4())
         now = utc_now()
+        normalized = normalize_query(question)
         with self._connect() as connection:
             connection.execute(
                 """INSERT INTO research_runs
-                   (run_id, question, run_label, freshness_class, response_detail, status,
+                   (run_id, question, normalized_query, run_label, freshness_class, response_detail, status,
                     stop_reason, cancel_requested, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, 'running', NULL, 0, ?, ?)""",
-                (run_id, question, run_label, freshness_class.value, response_detail, now, now),
+                   VALUES (?, ?, ?, ?, ?, ?, 'running', NULL, 0, ?, ?)""",
+                (run_id, question, normalized, run_label, freshness_class.value, response_detail, now, now),
             )
         return run_id
 
@@ -266,36 +267,45 @@ class SQLiteStorage:
     def find_fresh_source_ids_for_exact_query(self, normalized_query: str, min_fetched_at: str) -> list[str]:
         with self._connect() as connection:
             rows = connection.execute(
-                """SELECT r.question, f.references_json
+                """SELECT f.references_json
                    FROM research_runs r
                    JOIN final_answers f ON f.run_id=r.run_id
-                   WHERE r.status IN ('completed', 'partial')
+                   WHERE r.status IN ('completed', 'partial') AND r.normalized_query=?
                    ORDER BY f.created_at DESC""",
+                (normalized_query,),
             ).fetchall()
-            source_ids: list[str] = []
-            seen_urls: set[str] = set()
+            ordered_ids: list[str] = []
             for row in rows:
-                if normalize_query(row["question"]) != normalized_query:
-                    continue
                 for reference in json.loads(row["references_json"]):
                     source_id = reference.get("source_id")
-                    if not source_id:
-                        continue
-                    source = connection.execute(
-                        "SELECT canonical_url, fetched_at FROM sources WHERE source_id=?", (source_id,)
-                    ).fetchone()
-                    if not source or _parse_utc(source["fetched_at"]) < _parse_utc(min_fetched_at):
-                        continue
-                    rejected = connection.execute(
-                        "SELECT 1 FROM source_rejections WHERE normalized_query=? AND source_id=?",
-                        (normalized_query, source_id),
-                    ).fetchone()
-                    if rejected:
-                        continue
-                    if source["canonical_url"] in seen_urls:
-                        continue
-                    seen_urls.add(source["canonical_url"])
-                    source_ids.append(source_id)
+                    if source_id and source_id not in ordered_ids:
+                        ordered_ids.append(source_id)
+            if not ordered_ids:
+                return []
+            min_dt = _parse_utc(min_fetched_at)
+            placeholders = ",".join("?" for _ in ordered_ids)
+            candidates = connection.execute(
+                f"""SELECT s.source_id, s.canonical_url, s.fetched_at,
+                          sr.source_id AS rejected
+                   FROM sources s
+                   LEFT JOIN source_rejections sr
+                     ON sr.normalized_query=? AND sr.source_id=s.source_id
+                   WHERE s.source_id IN ({placeholders})""",
+                (normalized_query, *ordered_ids),
+            ).fetchall()
+            by_id = {row["source_id"]: row for row in candidates}
+            source_ids: list[str] = []
+            seen_urls: set[str] = set()
+            for source_id in ordered_ids:
+                source = by_id.get(source_id)
+                if source is None or source["rejected"] is not None:
+                    continue
+                if _parse_utc(source["fetched_at"]) < min_dt:
+                    continue
+                if source["canonical_url"] in seen_urls:
+                    continue
+                seen_urls.add(source["canonical_url"])
+                source_ids.append(source_id)
             return source_ids
 
     def reject_source_for_query(self, normalized_query: str, source_id: str) -> None:
@@ -409,7 +419,7 @@ class SQLiteStorage:
 
 _SCHEMA = """
 CREATE TABLE research_runs (
- run_id TEXT PRIMARY KEY, question TEXT NOT NULL, run_label TEXT, freshness_class TEXT NOT NULL,
+ run_id TEXT PRIMARY KEY, question TEXT NOT NULL, normalized_query TEXT NOT NULL, run_label TEXT, freshness_class TEXT NOT NULL,
  response_detail TEXT NOT NULL, status TEXT NOT NULL, stop_reason TEXT, cancel_requested INTEGER NOT NULL,
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
@@ -447,6 +457,7 @@ CREATE TABLE final_answers (
  answer_id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE REFERENCES research_runs(run_id) ON DELETE CASCADE,
  summary TEXT NOT NULL, answer TEXT NOT NULL, references_json TEXT NOT NULL, created_at TEXT NOT NULL
 );
+CREATE INDEX research_runs_normq_idx ON research_runs(normalized_query);
 CREATE INDEX research_queries_run_idx ON research_queries(run_id);
 CREATE INDEX sources_fetched_idx ON sources(fetched_at);
 CREATE INDEX sources_url_fetched_idx ON sources(canonical_url, fetched_at);

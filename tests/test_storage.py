@@ -6,7 +6,7 @@ from pathlib import Path
 
 from magpie.errors import StorageError
 from magpie.models import FreshnessClass, Reference, SourceKind
-from magpie.storage import SQLiteStorage, canonicalize_url
+from magpie.storage import SCHEMA_VERSION, SQLiteStorage, canonicalize_url
 
 
 class StorageTests(unittest.TestCase):
@@ -61,7 +61,7 @@ class StorageTests(unittest.TestCase):
                     "SELECT name FROM sqlite_master WHERE name='old_schema'"
                 ).fetchone()
             storage.close()
-        self.assertEqual(version, 3)
+        self.assertEqual(version, SCHEMA_VERSION)
         self.assertIsNone(old_table)
 
     def test_refreshing_url_creates_append_only_snapshot(self) -> None:
