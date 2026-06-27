@@ -8,26 +8,6 @@ It exposes an A2A interface for agent-to-agent use and a local CLI for direct
 queries. Results are compact, structured, grounded in references, and suitable
 for a conversational agent to present in its own voice.
 
-## Design Philosophy
-
-General-purpose conversational agents should not need to carry every tool,
-provider, and lookup workflow in their prompt. That becomes especially slow
-and unreliable when the system is backed by a smaller local model.
-
-Magpie keeps that work inside a dedicated information-retrieval agent:
-
-- The upstream agent delegates a plain-language question.
-- A small routing decision chooses general web research or a specialized path.
-- Deterministic code handles provider calls, budgets, caching, and validation.
-- The resolver receives all gathered evidence at once per round, not one source
-  at a time.
-- The upstream agent receives a grounded answer and references, then applies
-  personality or continues the conversation.
-
-The goal is not to make an LLM imitate a search engine. The goal is to give a
-smaller model a constrained workflow in which it can make useful decisions
-without drowning in context.
-
 ## What It Does
 
 - answers natural-language questions using web search and fetched pages
@@ -69,31 +49,6 @@ then check the environment:
 ```bash
 magpie doctor --live
 ```
-
-## Configuration
-
-Config resolution order:
-
-1. the path passed with `--config`
-2. `./config.json`
-3. `~/.config/magpie/config.json`
-4. built-in defaults
-
-See `config.example.json` for the full schema. Every setting also supports an
-environment-variable override using the `MAGPIE_` prefix. Common settings
-include:
-
-- `MAGPIE_RESOLVER_BASE_URL`
-- `MAGPIE_RESOLVER_MODEL`
-- `MAGPIE_RESOLVER_API_KEY`
-- `MAGPIE_SEARCH_API_KEY`
-- `MAGPIE_DATABASE_PATH`
-- `MAGPIE_A2A_BASE_URL`
-- `MAGPIE_WEATHER_ENABLED`
-- `MAGPIE_NEWS_ENABLED`
-- `MAGPIE_HISTORIAN_ENABLED`
-- `MAGPIE_HISTORIAN_BASE_URL`
-- `MAGPIE_HISTORIAN_TOKEN`
 
 ## Run
 
@@ -186,81 +141,6 @@ Published endpoints include:
 A2A task IDs are also durable Magpie run IDs, so task cancellation targets the
 same run recorded in SQLite.
 
-## How It Works
-
-Every request begins with a compact resolver routing call. Weather requests
-with a confident five-digit US ZIP code go directly to Neon Hail and bypass web
-search and synthesis. Anime requests are classified a second time into factual
-lookup, credits, or schedule operations and then sent to AniList. For factual
-lookups, the resolver selects from an allowlist of API fields; deterministic
-code builds the GraphQL query and returns only the requested values. Daily anime
-schedules use Japanese broadcast times converted to the system timezone.
-Jikan is used only as a fallback title-discovery index when AniList cannot
-resolve a spelling variant; final anime data and references still come from
-AniList. Broad category news requests are classified a second time into a
-category and strict local-time window, then answered directly from configured
-RSS or Atom feeds without article fetching or synthesis. Arbitrary topics such
-as company-specific news fall back to general web research. If a specialized
-route fails, Magpie falls back to general web research.
-
-General web lookup follows a bounded batch loop:
-
-1. Reuse fresh, previously accepted sources for the exact question when available.
-2. Ask the resolver for one focused search query.
-3. Search, deduplicate canonical URLs, and gather a limited source set.
-4. Use Exa inline content directly when available; fall back to Crawl4AI only
-   when inline content is absent or too short.
-5. Pass all evidence from the round to the resolver in one synthesis call.
-6. Continue with the next query only when questions remain.
-
-Resolver calls are serialized across concurrent runs because the expected
-deployment target is a smaller local model, not a high-throughput frontier API.
-
-Each research round gathers multiple sources before synthesizing. The resolver
-receives all evidence items from the round at once, along with any prior draft,
-and writes a thorough answer covering the relevant facets of the topic
-(background, purpose, key components, how it works). The synthesis prompt
-prefers several substantive paragraphs over a single terse paragraph. When
-sources present competing complete options (for example, different recipes),
-the resolver commits to the single best one rather than surveying alternatives.
-Specialized routes (weather, anime, news) bypass synthesis entirely and answer
-directly.
-
-## Grounding And Cache Behavior
-
-Search results, fetched snapshots, evidence, run events, and final answers are
-stored in SQLite. URL-specific snapshots remain distinct even when their text is
-identical.
-
-Exact-question cache reuse is intentionally conservative:
-
-- only sources cited by completed or partial answers are reusable candidates
-- sources rejected for a question remain excluded from that question
-- cached canonical URLs are not processed again when search returns duplicates
-- recent and evergreen questions use separate configurable cache lifetimes
-
-Source acceptance is a structured resolver decision. Magpie does not attempt to
-infer whether an answer is a refusal by matching generated prose with regex.
-
-## Bounded Lookup
-
-Runs are limited across queries, sources, evidence items, source characters, and
-incremental answer size. The principal settings are:
-
-- `max_search_queries_per_run`
-- `max_search_results_per_query`
-- `max_sources_per_query`
-- `max_sources_per_run`
-- `max_evidence_items_per_run`
-- `max_evidence_characters_per_item`
-- `max_synthesis_input_characters`
-- `max_incremental_answer_characters`
-- `resolver_max_tokens`
-
-Completed answers return `status: "ok"`. Grounded answers that stop before all
-remaining questions are resolved return `status: "partial"`. Runs without a
-usable grounded answer return `status: "error"`.
-
 ## Diagnostics
 
 Use `magpie ask ... --debug` or enable `include_timing_debug` to include
@@ -274,51 +154,17 @@ Raw model output is written to the resolver log only when
 `resolver_include_raw_output` is enabled. Logs may contain full prompts, source
 content, and model output; do not publish them without reviewing their contents.
 
-## Historian Integration
+## Further Documentation
 
-Historian event production is optional and disabled by default.
-[Historian](https://github.com/freebsdgirl/historian) is the event sink Magpie
-can publish to for research runs, routes, queries, sources, synthesis, and
-failure activity. Install `historian.manifest.json` with Historian, store the
-printed token in `MAGPIE_HISTORIAN_TOKEN`, and set
-`MAGPIE_HISTORIAN_ENABLED=true`. Historian delivery failures are logged but
-never change a successful research result into a failure.
+For contributors and operators working with the code:
 
-Install the bundled manifest from the Historian checkout:
-
-```console
-historian app install /path/to/magpie/historian.manifest.json
-```
-
-The token may also be stored as `historian_token` in Magpie's configuration.
-The default endpoint is `http://127.0.0.1:8768`. Delivery retries connection
-failures and HTTP 5xx responses, but no durable client-side spool is created.
-
-Magpie emits compact lifecycle records after its normal durable transitions. It
-does not send fetched documents, answer prose, raw provider payloads, hidden
-model reasoning, or credentials.
-
-## Development Notes
-
-- Keep resolver prompts and decision surfaces small. More choices can make a
-  local model slower and less reliable even when prompt ingestion is fast.
-- Prefer structured model decisions and deterministic validation over prose
-  interpretation.
-- Specialized API routes should bypass general research when they can produce a
-  better grounded result.
-- The built-in RSS registry is intended for local or personal aggregation.
-  Check publisher terms before redistributing feed content.
-- API clients should request and retain only fields needed for the final answer;
-  provider metadata must not leak into resolver prompts or user-facing output.
-- Do not cache rejected sources as answer candidates.
-- Do not silently retry requests that may already have been accepted.
-- The SQLite schema is versioned. Incompatible pre-release databases may be
-  replaced during initialization.
-
-Run the test suite with:
-
-```bash
-python -m unittest discover -s tests -v
-# or, when pytest is installed
-pytest
-```
+- [docs/architecture.md](docs/architecture.md) — design philosophy, routing,
+  the research loop, synthesis, stop reasons, concurrency
+- [docs/configuration.md](docs/configuration.md) — full settings reference,
+  config resolution, environment-variable overrides
+- [docs/storage.md](docs/storage.md) — SQLite schema, cache reuse, freshness
+  detection, source rejection
+- [docs/historian.md](docs/historian.md) — Historian event integration setup
+  and emitted event types
+- [docs/development.md](docs/development.md) — design principles, testing,
+  provider protocols
