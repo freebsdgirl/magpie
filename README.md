@@ -20,8 +20,7 @@ General Q&A and the specialized routes below are all invoked through
 - **fetch** — retrieves full web page content by index or by URL.
 - **weather** — routes current-condition and forecast requests to the Neon Hail
   API.
-- **anime** — answers anime facts, Japanese voice-cast questions, and local-time
-  airing schedules through AniList.
+- **anime** — pulls anime information from AniList.
 - **news** — returns compact category digests from publisher RSS and Atom feeds.
 
 Across all query types, Magpie caches source snapshots and completed answers in
