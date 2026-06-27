@@ -50,13 +50,22 @@ def build_agent_card(base_url: str) -> AgentCard:
         capabilities=AgentCapabilities(streaming=True, push_notifications=False, extended_agent_card=False),
         default_input_modes=["text/plain"],
         default_output_modes=["application/json"],
-        skills=[AgentSkill(
-            id="magpie_ask", name="Natural-language question answering",
-            description="Answer a question using bounded web lookup or a specialized information API.",
-            tags=["ask", "search", "weather", "anime", "news"],
-            examples=["Who is the mayor of New York?", "What anime airs today?", "What's the latest AI news?"],
-            input_modes=["text/plain"], output_modes=["application/json"],
-        )],
+        skills=[
+            AgentSkill(
+                id="magpie_ask", name="Natural-language question answering",
+                description="Answer a question using bounded web lookup or a specialized information API.",
+                tags=["ask", "search", "weather", "anime", "news"],
+                examples=["Who is the mayor of New York?", "What anime airs today?", "What's the latest AI news?"],
+                input_modes=["text/plain"], output_modes=["application/json"],
+            ),
+            AgentSkill(
+                id="magpie_search", name="Indexed web search",
+                description="Search the web and return indexed results with summaries and source URLs. No synthesis.",
+                tags=["search", "index"],
+                examples=["rust borrow checker", "a2a protocol", "latest AI news"],
+                input_modes=["text/plain"], output_modes=["application/json"],
+            ),
+        ],
     )
 
 
@@ -71,12 +80,7 @@ class SDKResearchAgentExecutor(AgentExecutor):
             raise InternalError("Request context did not include task identifiers.")
         metadata = context.metadata
         question = context.get_user_input()
-        request = ResearchRequest(
-            question=question,
-            max_references=int(metadata.get("max_references", 5)),
-            response_detail=ResponseDetail(metadata.get("response_detail", "compact")),
-            run_label=metadata.get("run_label"),
-        )
+        skill = metadata.get("skill", "magpie_ask")
         task = new_task(
             task_id=context.task_id, context_id=context.context_id,
             state=TaskState.TASK_STATE_SUBMITTED, history=[context.message],
@@ -85,28 +89,47 @@ class SDKResearchAgentExecutor(AgentExecutor):
         updater = TaskUpdater(event_queue=event_queue, task_id=context.task_id, context_id=context.context_id)
         await updater.start_work()
         try:
-            result = await asyncio.to_thread(self._service.research, request, run_id=context.task_id)
+            if skill == "magpie_search":
+                result = await asyncio.to_thread(
+                    self._service.search, question,
+                    max_results=int(metadata.get("max_references", 5)),
+                    run_id=context.task_id,
+                )
+            else:
+                request = ResearchRequest(
+                    question=question,
+                    max_references=int(metadata.get("max_references", 5)),
+                    response_detail=ResponseDetail(metadata.get("response_detail", "compact")),
+                    run_label=metadata.get("run_label"),
+                )
+                result = await asyncio.to_thread(self._service.research, request, run_id=context.task_id)
         except asyncio.CancelledError:
             self._service.cancel_run(context.task_id)
             raise
         try:
             payload = to_jsonable(result)
+            artifact_name = "magpie-search-result" if skill == "magpie_search" else "magpie-ask-result"
             await updater.add_artifact(
                 parts=[new_data_part(payload, media_type="application/json")],
-                name="magpie-ask-result",
+                name=artifact_name,
             )
-            text_response = (
-                getattr(result, "answer", "")
-                or getattr(result, "summary", "")
-                or getattr(result, "message", "")
-            )
+            if skill == "magpie_search":
+                text_response = f"Found {len(result.results)} results for: {result.query}"
+            else:
+                text_response = (
+                    getattr(result, "answer", "")
+                    or getattr(result, "summary", "")
+                    or getattr(result, "message", "")
+                )
             message = Message(
                 role=Role.ROLE_AGENT, message_id=str(uuid4()), task_id=context.task_id,
                 context_id=context.context_id,
                 parts=[new_text_part(text_response),
                        new_data_part(payload, media_type="application/json")],
             )
-            if result.stop_reason == StopReason.CANCELLED:
+            if skill == "magpie_search":
+                await updater.complete(message)
+            elif result.stop_reason == StopReason.CANCELLED:
                 await updater.update_status(TaskState.TASK_STATE_CANCELED, message)
             elif result.status in {"ok", "partial"}:
                 await updater.complete(message)

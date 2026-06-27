@@ -158,6 +158,25 @@ class ResearchErrorResult:
 
 
 @dataclass(slots=True)
+class IndexedSearchResultItem:
+    index: int
+    title: str
+    url: str
+    site_name: str | None
+    published_at: str | None
+    summary: str
+    content: str
+
+
+@dataclass(slots=True)
+class IndexedSearchResult:
+    run_id: str
+    query: str
+    results: list[IndexedSearchResultItem]
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class QueryProposal:
     query: str
 

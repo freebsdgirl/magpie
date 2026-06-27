@@ -28,6 +28,11 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--json", action="store_true", dest="as_json")
     ask.add_argument("--debug", action="store_true")
 
+    search = subparsers.add_parser("search", help="Search the web and return indexed results.")
+    search.add_argument("query", help="Search query.")
+    search.add_argument("--max-results", type=int, default=5)
+    search.add_argument("--json", action="store_true", dest="as_json")
+
     serve = subparsers.add_parser("serve", help="Run the local A2A server.")
     serve.add_argument("--host", default=None, help="Override the configured bind host.")
     serve.add_argument("--port", type=int, default=None, help="Override the configured bind port.")
@@ -57,6 +62,32 @@ def _human_output(payload: dict[str, object]) -> str:
         lines.append("references:")
         for reference in references:
             lines.append(f"- {reference['title']} ({reference['url']})")
+    return "\n".join(lines)
+
+
+def _search_output(payload: dict[str, object]) -> str:
+    lines = [
+        f"run_id: {payload.get('run_id')}",
+        f"query: {payload.get('query')}",
+        f"results: {len(payload.get('results', []))}",
+        "",
+    ]
+    for item in payload.get("results", []):
+        lines.append(f"[{item['index']}] {item['title']}")
+        lines.append(f"    url: {item['url']}")
+        if item.get("site_name"):
+            lines.append(f"    site: {item['site_name']}")
+        if item.get("published_at"):
+            lines.append(f"    published: {item['published_at']}")
+        summary = str(item.get("summary", ""))
+        if summary:
+            lines.append(f"    summary: {summary}")
+        lines.append("")
+    warnings = payload.get("warnings", [])
+    if warnings:
+        lines.append("warnings:")
+        for warning in warnings:
+            lines.append(f"  - {warning}")
     return "\n".join(lines)
 
 
@@ -115,6 +146,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = run_doctor(app.settings, app.search_client, app.fetcher, app.news_client, live=args.live)
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 0 if payload.get("status") == "ok" else 2
+
+        if args.command == "search":
+            settings = Settings.load(args.config_path)
+            try:
+                from .app import build_app as _build_app
+                _app = _build_app(args.config_path)
+                result = _app.service.search(args.query, max_results=args.max_results)
+                payload = to_jsonable(result)
+                _app.service.close()
+                _app.storage.close()
+            except Exception as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
+            if args.as_json:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                print(valid_unicode(_search_output(payload)))
+            return 0
 
         settings = Settings.load(args.config_path)
         request = ResearchRequest(
