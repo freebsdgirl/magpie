@@ -449,21 +449,23 @@ class ResearchService:
                 seen_urls.update(self.storage.get_canonical_urls(cached_ids))
                 for reference in self.storage.get_source_references(cached_ids):
                     self._record_cache_hit(run_id, reference, "exact_query")
-                evidence.extend(self._evidence_from_sources(
+                cached_evidence = self._evidence_from_sources(
                     run_id, cached_ids, request.question, budget, "Reused from exact-query cache"
-                ))
-                for item in evidence:
-                    last_draft = self._synthesize(run_id, request.question, item, last_draft, timings)
-                    if not last_draft.source_answers_question:
-                        self.storage.reject_source_for_query(normalize_query(request.question), item.source_id)
-                        self._record_source_rejected(
-                            run_id, item.source_id, normalize_query(request.question),
-                            "source_did_not_answer_question",
-                        )
+                )
+                if cached_evidence:
+                    evidence.extend(cached_evidence)
+                    last_draft = self._synthesize(run_id, request.question, cached_evidence, last_draft, timings)
                     remaining_questions = self._remaining_questions_after_quality(
                         request.question, last_draft, limitations
                     )
-                    if not last_draft.remaining_questions:
+                    if not last_draft.source_answers_question:
+                        for item in cached_evidence:
+                            self.storage.reject_source_for_query(normalize_query(request.question), item.source_id)
+                            self._record_source_rejected(
+                                run_id, item.source_id, normalize_query(request.question),
+                                "source_did_not_answer_question",
+                            )
+                    if not remaining_questions:
                         return self._finalize(run_id, request, last_draft, StopReason.ANSWERED_FROM_CACHE, timings)
 
             while budget.queries_remaining > 0 and budget.sources_remaining > 0 and budget.evidence_remaining > 0:
@@ -506,6 +508,7 @@ class ResearchService:
                     limitations.append(f"No new sources found for query: {proposal.query}")
                     continue
 
+                round_evidence: list[EvidenceItem] = []
                 for result in candidates:
                     if budget.evidence_remaining <= 0:
                         break
@@ -518,28 +521,32 @@ class ResearchService:
                     warnings.extend(new_warnings)
                     limitations.extend(new_limitations)
                     item = self._select_evidence(
-                        run_id, source_id, text, request.question, remaining_questions, budget, []
+                        run_id, source_id, text, request.question, remaining_questions, budget, [],
                     )
                     if item:
-                        evidence.append(item)
-                        self._trace(run_id, "SYNTHESIS CHECK", [
+                        round_evidence.append(item)
+                        self._trace(run_id, "EVIDENCE SELECTED", [
                             f"source_id: {item.source_id}",
                             f"source_characters: {len(item.excerpt)}",
                         ])
-                        last_draft = self._synthesize(run_id, request.question, item, last_draft, timings)
-                        if not last_draft.source_answers_question:
-                            self.storage.reject_source_for_query(query, item.source_id)
-                            self._record_source_rejected(
-                                run_id, item.source_id, query, "source_did_not_answer_question"
-                            )
-                        remaining_questions = self._remaining_questions_after_quality(
-                            request.question, last_draft, limitations
+                if not round_evidence:
+                    continue
+                evidence.extend(round_evidence)
+                last_draft = self._synthesize(run_id, request.question, round_evidence, last_draft, timings)
+                if not last_draft.source_answers_question:
+                    for item in round_evidence:
+                        self.storage.reject_source_for_query(query, item.source_id)
+                        self._record_source_rejected(
+                            run_id, item.source_id, query, "source_did_not_answer_question"
                         )
-                        if not remaining_questions:
-                            return self._finalize(
-                                run_id, request, last_draft, StopReason.NEEDED_NEW_SEARCH,
-                                timings, warnings, limitations,
-                            )
+                remaining_questions = self._remaining_questions_after_quality(
+                    request.question, last_draft, limitations
+                )
+                if not remaining_questions:
+                    return self._finalize(
+                        run_id, request, last_draft, StopReason.NEEDED_NEW_SEARCH,
+                        timings, warnings, limitations,
+                    )
 
             return self._finish_incomplete(
                 run_id, request, last_draft, warnings, limitations, StopReason.BUDGET_EXHAUSTED, timings
@@ -840,6 +847,27 @@ class ResearchService:
             reference = self.storage.get_source_references([cached["source_id"]])[0]
             self._record_cache_hit(run_id, reference, "url")
             return cached["source_id"], cached["text"], [], [], 0.0
+        if result.inline_text and len(result.inline_text.strip()) >= 500:
+            started = perf_counter()
+            source_id = self.storage.upsert_source(
+                run_id, result.url, result.title, result.site_name, result.published_at, result.inline_text,
+                {"provider_result": result.raw_result, "provider": result.provider},
+                SourceKind.SEARCH_RESULT_FALLBACK, search_result_id, None,
+            )
+            elapsed = round((perf_counter() - started) * 1000, 2)
+            self._record_source_fetched(
+                run_id,
+                source_id,
+                search_result_id=search_result_id,
+                url=result.url,
+                title=result.title,
+                provider=result.provider or self.settings.search_provider,
+                source_kind=SourceKind.SEARCH_RESULT_FALLBACK.value,
+                published_at=result.published_at,
+                duration_ms=elapsed,
+                fallback_content=False,
+            )
+            return source_id, result.inline_text, [], [], elapsed
         started = perf_counter()
         try:
             self._set_stage(run_id, "fetch")
@@ -981,17 +1009,17 @@ class ResearchService:
         return evidence
 
     def _synthesize(
-        self, run_id: str, question: str, evidence: EvidenceItem,
+        self, run_id: str, question: str, evidence: list[EvidenceItem],
         prior_draft: SynthesisDraft | None, timings: dict[str, list[float]],
     ) -> SynthesisDraft:
         self._raise_if_cancelled(run_id)
-        max_chars = self.settings.max_synthesis_input_characters
-        bounded = EvidenceItem(
-            evidence.evidence_id, evidence.source_id, evidence.excerpt[:max_chars], evidence.note
-        )
         self._set_stage(run_id, "synthesis")
-        draft, elapsed = self._call_resolver("synthesize", question, [bounded], prior_draft)
+        draft, elapsed = self._call_resolver("synthesize", question, evidence, prior_draft)
         self._record_timing(timings, "resolver.synthesize", elapsed)
+        allowed = {
+            *(item.source_id for item in evidence),
+            *(prior_draft.cited_source_ids if prior_draft else []),
+        }
         if not draft.source_answers_question:
             draft = SynthesisDraft(
                 summary=prior_draft.summary if prior_draft else "",
@@ -1002,7 +1030,6 @@ class ResearchService:
                 ),
                 source_answers_question=False,
             )
-        allowed = {bounded.source_id, *(prior_draft.cited_source_ids if prior_draft else [])}
         illegal = set(draft.cited_source_ids) - allowed
         if illegal:
             raise ResolverError(f"Synthesis cited unknown source IDs: {sorted(illegal)}")
@@ -1016,7 +1043,7 @@ class ResearchService:
             "research.synthesis.completed",
             {
                 "run_id": run_id,
-                "source_id": bounded.source_id,
+                "evidence_count": len(evidence),
                 "cited_source_ids": draft.cited_source_ids,
                 "source_answers_question": draft.source_answers_question,
                 "remaining_question_count": len(draft.remaining_questions),
@@ -1024,7 +1051,7 @@ class ResearchService:
                 "answer_characters": len(draft.answer),
                 "duration_ms": elapsed,
             },
-            subject=bounded.source_id,
+            subject=",".join(draft.cited_source_ids),
         )
         return draft
 

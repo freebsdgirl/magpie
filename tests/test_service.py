@@ -51,8 +51,13 @@ class RogueResolver(FakeResolverClient):
 
 
 class NeedsMoreInfoResolver(FakeResolverClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
     def synthesize(self, question, evidence, prior_draft=None):
-        if prior_draft is None:
+        self.calls += 1
+        if self.calls == 1:
             return SynthesisDraft(
                 summary="",
                 answer="",
@@ -64,13 +69,17 @@ class NeedsMoreInfoResolver(FakeResolverClient):
 
 
 class NeedsFivePagesResolver(FakeResolverClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen_sources: list[str] = []
+
     def synthesize(self, question, evidence, prior_draft=None):
-        prior_count = len(prior_draft.cited_source_ids) if prior_draft else 0
-        if prior_count < 4:
+        self.seen_sources.extend(item.source_id for item in evidence)
+        if len(self.seen_sources) < 5:
             return SynthesisDraft(
                 summary="",
                 answer="",
-                cited_source_ids=[*(prior_draft.cited_source_ids if prior_draft else []), evidence[0].source_id],
+                cited_source_ids=[],
                 remaining_questions=["What additional information completes the answer?"],
                 limitations=["Need more evidence."],
             )
@@ -123,7 +132,7 @@ class SerialResolver(FakeResolverClient):
     def synthesize(self, question, evidence, prior_draft=None):
         self.source_counts.append(len(evidence))
         self.prior_drafts.append(prior_draft)
-        cited = [*(prior_draft.cited_source_ids if prior_draft else []), evidence[0].source_id]
+        cited = [*(prior_draft.cited_source_ids if prior_draft else []), *[item.source_id for item in evidence]]
         if len(self.source_counts) == 1:
             return SynthesisDraft("partial", "partial answer", cited, ["Need another source"])
         return SynthesisDraft("complete", "complete answer", cited, [])
@@ -142,14 +151,14 @@ class RejectThenAnswerResolver(FakeResolverClient):
             return SynthesisDraft(
                 "The source does not contain weather information.",
                 "I cannot provide the current weather because the source does not contain that information.",
-                [evidence[0].source_id],
                 [],
+                ["Find a source with current weather for the zip code"],
                 source_answers_question=False,
             )
         return SynthesisDraft(
             "Current weather found.",
             "It is 62°F and cloudy.",
-            [evidence[0].source_id],
+            [item.source_id for item in evidence],
             [],
         )
 
@@ -160,8 +169,8 @@ class CachedThenNewResolver(FakeResolverClient):
         self.source_ids: list[str] = []
 
     def synthesize(self, question, evidence, prior_draft=None):
-        self.source_ids.append(evidence[0].source_id)
-        cited = [*(prior_draft.cited_source_ids if prior_draft else []), evidence[0].source_id]
+        self.source_ids.extend(item.source_id for item in evidence)
+        cited = [*(prior_draft.cited_source_ids if prior_draft else []), *[item.source_id for item in evidence]]
         if prior_draft is None:
             return SynthesisDraft("partial", "partial answer", cited, ["Need a new source"])
         return SynthesisDraft("complete", "complete answer", cited, [])
@@ -534,24 +543,29 @@ class ServiceTests(unittest.TestCase):
             service.storage.close()
 
     def test_synthesis_can_request_more_information_before_completing(self) -> None:
+        call_count = 0
+
         class TwoPageSearch(FakeSearchClient):
-            def __post_init__(self) -> None:
-                self.index = {
-                    "who is the mayor of new york": [
+            def search(self, request):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    return [
                         SearchResultRecord(
                             title="First page",
                             url="https://example.com/first",
                             snippet="first snippet",
                             provider="fake",
                         ),
-                        SearchResultRecord(
-                            title="Second page",
-                            url="https://example.com/second",
-                            snippet="second snippet",
-                            provider="fake",
-                        ),
                     ]
-                }
+                return [
+                    SearchResultRecord(
+                        title="Second page",
+                        url="https://example.com/second",
+                        snippet="second snippet",
+                        provider="fake",
+                    ),
+                ]
 
         class TwoPageFetcher(FakeFetcher):
             def __post_init__(self) -> None:
@@ -638,7 +652,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(resolver.calls, 2)
         self.assertIn("500g flour", result.answer)
 
-    def test_synthesis_receives_one_source_at_a_time_with_prior_draft(self) -> None:
+    def test_synthesis_receives_all_evidence_per_round_with_prior_draft(self) -> None:
         class TwoResultSearch(FakeSearchClient):
             def search(self, request):
                 return [
@@ -651,16 +665,23 @@ class ServiceTests(unittest.TestCase):
             service = self._service(tmpdir, resolver=resolver, search_client=TwoResultSearch())
             result = service.research(ResearchRequest(question="question"))
 
-        self.assertEqual(result.status, "ok")
-        self.assertEqual(resolver.source_counts, [1, 1])
+        self.assertEqual(result.status, "partial")
+        # batch: first round gets both sources at once
+        self.assertEqual(resolver.source_counts[0], 2)
         self.assertIsNone(resolver.prior_drafts[0])
-        self.assertEqual(resolver.prior_drafts[1].answer, "partial answer")
 
-    def test_non_answer_draft_is_discarded_and_next_source_is_checked(self) -> None:
+    def test_non_answer_round_is_discarded_and_next_round_answers(self) -> None:
+        call_count = 0
+
         class WeatherSearch(FakeSearchClient):
             def search(self, request):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    return [
+                        SearchResultRecord("Bad weather page", "https://example.com/bad", "bad", provider="fake"),
+                    ]
                 return [
-                    SearchResultRecord("Bad weather page", "https://example.com/bad", "bad", provider="fake"),
                     SearchResultRecord("Useful weather page", "https://example.com/good", "good", provider="fake"),
                 ]
 
@@ -671,7 +692,6 @@ class ServiceTests(unittest.TestCase):
 
         self.assertEqual(result.status, "ok")
         self.assertEqual(resolver.calls, 2)
-        self.assertEqual(resolver.priors[1].answer, "")
         self.assertEqual(result.answer, "It is 62°F and cloudy.")
         self.assertEqual(len(result.references), 1)
 
@@ -767,7 +787,7 @@ class ServiceTests(unittest.TestCase):
             fetch_log = (Path(tmpdir) / "fetch.log").read_text(encoding="utf-8")
             self.assertIn("=== QUERY PROPOSED ===", fetch_log)
             self.assertIn("=== SEARCH RESULTS ===", fetch_log)
-            self.assertIn("=== SYNTHESIS CHECK ===", fetch_log)
+            self.assertIn("=== EVIDENCE SELECTED ===", fetch_log)
             service.storage.close()
 
     def test_cancel_run_updates_status(self) -> None:

@@ -179,6 +179,16 @@ new source plus a bounded prior draft. Resolver calls are also serialized across
 concurrent runs because the expected deployment target is a smaller local model,
 not a high-throughput frontier API.
 
+Each research round gathers multiple sources before synthesizing. The resolver
+receives all evidence items from the round at once, along with any prior draft,
+and writes a thorough answer covering the relevant facets of the topic
+(background, purpose, key components, how it works). The synthesis prompt
+prefers several substantive paragraphs over a single terse paragraph. When
+sources present competing complete options (for example, different recipes),
+the resolver commits to the single best one rather than surveying alternatives.
+Specialized routes (weather, anime, news) bypass synthesis entirely and answer
+directly.
+
 ## Grounding And Cache Behavior
 
 Search results, fetched snapshots, evidence, run events, and final answers are

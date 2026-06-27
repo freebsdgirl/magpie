@@ -90,18 +90,47 @@ class OpenAICompatibleResolverTests(unittest.TestCase):
         schema = captured_payloads[0]["response_format"]["json_schema"]["schema"]
         self.assertIn("source_answers_question", schema["required"])
         user_payload = json.loads(captured_payloads[0]["messages"][1]["content"])
-        self.assertIn("new_source", user_payload)
-        self.assertNotIn("evidence", user_payload)
+        self.assertIn("sources", user_payload)
+        self.assertNotIn("new_source", user_payload)
 
-    def test_synthesize_rejects_multiple_sources(self) -> None:
+    def test_synthesize_accepts_multiple_sources(self) -> None:
+        captured_payloads: list[dict[str, object]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_payloads.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"summary":"short","answer":"combined fact","cited_source_ids":["source-1","source-2"],'
+                                    '"remaining_questions":[],"source_answers_question":true}'
+                                )
+                            }
+                        }
+                    ]
+                },
+            )
+
         evidence = [
             EvidenceItem(evidence_id="e-1", source_id="source-1", excerpt="one", note="note"),
             EvidenceItem(evidence_id="e-2", source_id="source-2", excerpt="two", note="note"),
         ]
         with tempfile.TemporaryDirectory() as tmpdir:
-            client = OpenAICompatibleResolverClient(settings=self._settings(tmpdir))
-            with self.assertRaisesRegex(Exception, "exactly one source"):
-                client.synthesize("question", evidence)
+            client = OpenAICompatibleResolverClient(
+                settings=self._settings(tmpdir),
+                transport=httpx.MockTransport(handler),
+            )
+            draft = client.synthesize("question", evidence)
+
+        self.assertEqual(draft.answer, "combined fact")
+        self.assertEqual(draft.cited_source_ids, ["source-1", "source-2"])
+        user_payload = json.loads(captured_payloads[0]["messages"][1]["content"])
+        self.assertIn("sources", user_payload)
+        self.assertNotIn("new_source", user_payload)
+        self.assertEqual(len(user_payload["sources"]), 2)
 
     def test_synthesize_repairs_invalid_citation_before_non_answer_filtering(self) -> None:
         def handler(_request: httpx.Request) -> httpx.Response:
