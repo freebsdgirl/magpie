@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
@@ -14,7 +15,8 @@ from .errors import AnimeError, FetchError, NewsError, ResearchCancelled, Resolv
 from .config import Settings
 from .historian import HistorianSink, NullHistorianSink, build_event
 from .models import (
-    AnimeReport, AnimeRequestKind, EvidenceItem, FreshnessClass, NewsRequestKind, PlanningContext,
+    AnimeReport, AnimeRequestKind, EvidenceItem, FetchResult, FreshnessClass, IndexedSearchResult,
+    IndexedSearchResultItem, NewsRequestKind, PlanningContext,
     ResearchErrorResult, ResearchRequest, ResearchResult, RequestRoute, ResponseDetail, RunBudget,
     SearchRequest, SearchResultRecord, SourceKind, StopReason, SynthesisDraft, WeatherKind, to_jsonable,
 )
@@ -582,6 +584,125 @@ class ResearchService:
         finally:
             with self._telemetry_lock:
                 self._telemetry.pop(run_id, None)
+
+    def search(self, query: str, *, max_results: int = 5, run_id: str | None = None) -> IndexedSearchResult:
+        freshness = detect_freshness_class(query)
+        run_id = self.storage.create_run(query, None, freshness, ResponseDetail.COMPACT.value, run_id=run_id)
+        self._begin_logs(run_id, query)
+        self._select_route(run_id, RequestRoute.WEB_RESEARCH.value)
+        warnings: list[str] = []
+        timings: dict[str, list[float]] = {}
+        try:
+            self._raise_if_cancelled(run_id)
+            budget = RunBudget(
+                queries_remaining=1,
+                sources_remaining=max_results,
+                evidence_remaining=max_results,
+            )
+            context = PlanningContext([], [], [], budget)
+            proposal, elapsed = self._call_resolver("propose_query", query, context)
+            self._record_timing(timings, "resolver.propose_query", elapsed)
+            normalized = normalize_query(proposal.query)
+            query_id = self.storage.add_query(run_id, normalized, self.settings.search_provider, freshness)
+            self._set_stage(run_id, "search")
+            results, elapsed = self._search(run_id, proposal.query, freshness)
+            self._record_timing(timings, "search", elapsed)
+            result_ids = self.storage.add_search_results(query_id, [to_jsonable(r) for r in results])
+            seen_urls: set[str] = set()
+            items: list[IndexedSearchResultItem] = []
+            for result in results[:max_results]:
+                canonical = canonicalize_url(result.url)
+                if canonical in seen_urls:
+                    continue
+                seen_urls.add(canonical)
+                self._record_source_discovered(run_id, result_ids.get(result.url), result, canonical)
+                content = result.inline_text or "\n".join(result.highlights) or result.snippet
+                if not content.strip():
+                    warnings.append(f"No content extracted for {result.url}")
+                    continue
+                budget.sources_remaining -= 1
+                source_id = self.storage.upsert_source(
+                    run_id, result.url, result.title, result.site_name, result.published_at, content,
+                    {"provider_result": result.raw_result, "provider": result.provider},
+                    SourceKind.SEARCH_RESULT_FALLBACK, result_ids.get(result.url), None,
+                )
+                summary = result.snippet or content[:500]
+                items.append(IndexedSearchResultItem(
+                    index=len(items),
+                    title=result.title,
+                    url=result.url,
+                    site_name=result.site_name,
+                    published_at=result.published_at,
+                    summary=summary,
+                ))
+            self.storage.update_run_status(run_id, "completed", StopReason.NEEDED_NEW_SEARCH.value)
+            self._trace(run_id, "SEARCH COMPLETED", [f"result_count: {len(items)}"])
+            return IndexedSearchResult(run_id=run_id, query=proposal.query, results=items, warnings=warnings)
+        except Exception as exc:  # noqa: BLE001
+            self.storage.update_run_status(run_id, "failed", StopReason.FAILED.value)
+            self.storage.append_event(run_id, "run_failed", {"error": str(exc)})
+            raise
+
+    def fetch(
+        self, *, run_id: str | None = None, index: int | None = None,
+        url: str | None = None, full: bool = False,
+    ) -> FetchResult:
+        warnings: list[str] = []
+        if index is not None and run_id is not None:
+            stored = self._fetch_stored_index(run_id, index)
+            if stored and not full:
+                return stored
+            if stored and full:
+                url = stored.url
+                title = stored.title
+            else:
+                raise ResolverError(f"No source found at index {index} for run {run_id}.")
+        if not url:
+            raise ResolverError("fetch requires either (run_id + index) or url.")
+        fetch_run_id = run_id or str(uuid.uuid4())
+        if not run_id:
+            freshness = detect_freshness_class(url)
+            self.storage.create_run(url, None, freshness, ResponseDetail.COMPACT.value, run_id=fetch_run_id)
+            self._begin_logs(fetch_run_id, url)
+        started = perf_counter()
+        try:
+            fetched = self.fetcher.fetch(url)
+            elapsed = round((perf_counter() - started) * 1000, 2)
+            source_id = self.storage.upsert_source(
+                fetch_run_id, fetched.url, fetched.title, fetched.site_name, fetched.published_at, fetched.text,
+                {"metadata": fetched.metadata, "markdown": fetched.markdown, "raw_html": fetched.raw_html,
+                 "retrieved_via": fetched.retrieved_via},
+                fetched.source_kind, None, fetched.fetch_error,
+            )
+            content = fetched.markdown or fetched.text
+            self._trace(fetch_run_id, "FETCH COMPLETED", [
+                f"url: {url}", f"source_id: {source_id}", f"characters: {len(content)}", f"elapsed_ms: {elapsed}",
+            ])
+            return FetchResult(
+                run_id=fetch_run_id, index=index, url=fetched.url,
+                title=fetched.title, content=content, fetched_via="crawl4ai", warnings=warnings,
+            )
+        except FetchError as exc:
+            raise ResolverError(f"Failed to fetch {url}: {exc}") from exc
+
+    def _fetch_stored_index(self, run_id: str, index: int) -> FetchResult | None:
+        with self.storage._connect() as connection:
+            rows = connection.execute(
+                """SELECT s.source_id, s.raw_url, s.title, s.site_name, s.source_kind, d.text
+                   FROM run_source_links rsl
+                   JOIN sources s ON s.source_id = rsl.source_id
+                   JOIN documents d ON d.document_id = s.document_id
+                   WHERE rsl.run_id = ?
+                   ORDER BY s.fetched_at""",
+                (run_id,),
+            ).fetchall()
+        if index >= len(rows):
+            return None
+        row = rows[index]
+        return FetchResult(
+            run_id=run_id, index=index, url=row["raw_url"],
+            title=row["title"], content=row["text"], fetched_via="stored",
+        )
 
     def _try_specialized_route(
         self, run_id: str, request: ResearchRequest, timings: dict[str, list[float]], warnings: list[str]

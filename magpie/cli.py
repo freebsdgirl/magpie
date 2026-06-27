@@ -28,6 +28,17 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--json", action="store_true", dest="as_json")
     ask.add_argument("--debug", action="store_true")
 
+    search = subparsers.add_parser("search", help="Search the web and return indexed results.")
+    search.add_argument("query", help="Search query.")
+    search.add_argument("--max-results", type=int, default=5)
+    search.add_argument("--json", action="store_true", dest="as_json")
+
+    fetch = subparsers.add_parser("fetch", help="Fetch web page content by index or URL.")
+    fetch.add_argument("target", help="Index number (from a prior search) or URL.")
+    fetch.add_argument("--run-id", default=None, help="Run ID from a prior magpie search.")
+    fetch.add_argument("--full", action="store_true", help="Fetch the full page via crawl4ai instead of stored content.")
+    fetch.add_argument("--json", action="store_true", dest="as_json")
+
     serve = subparsers.add_parser("serve", help="Run the local A2A server.")
     serve.add_argument("--host", default=None, help="Override the configured bind host.")
     serve.add_argument("--port", type=int, default=None, help="Override the configured bind port.")
@@ -57,6 +68,46 @@ def _human_output(payload: dict[str, object]) -> str:
         lines.append("references:")
         for reference in references:
             lines.append(f"- {reference['title']} ({reference['url']})")
+    return "\n".join(lines)
+
+
+def _search_output(payload: dict[str, object]) -> str:
+    lines = [
+        f"run_id: {payload.get('run_id')}",
+        f"query: {payload.get('query')}",
+        f"results: {len(payload.get('results', []))}",
+        "",
+    ]
+    for item in payload.get("results", []):
+        lines.append(f"[{item['index']}] {item['title']}")
+        lines.append(f"    url: {item['url']}")
+        if item.get("site_name"):
+            lines.append(f"    site: {item['site_name']}")
+        if item.get("published_at"):
+            lines.append(f"    published: {item['published_at']}")
+        summary = str(item.get("summary", ""))
+        if summary:
+            lines.append(f"    summary: {summary}")
+        lines.append("")
+    warnings = payload.get("warnings", [])
+    if warnings:
+        lines.append("warnings:")
+        for warning in warnings:
+            lines.append(f"  - {warning}")
+    return "\n".join(lines)
+
+
+def _fetch_output(payload: dict[str, object]) -> str:
+    lines = [
+        f"run_id: {payload.get('run_id')}",
+        f"url: {payload.get('url')}",
+        f"title: {payload.get('title')}",
+        f"fetched_via: {payload.get('fetched_via')}",
+        f"content_length: {len(str(payload.get('content', '')))}",
+        "",
+        "content:",
+        str(payload.get("content", "")),
+    ]
     return "\n".join(lines)
 
 
@@ -115,6 +166,52 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = run_doctor(app.settings, app.search_client, app.fetcher, app.news_client, live=args.live)
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 0 if payload.get("status") == "ok" else 2
+
+        if args.command == "search":
+            settings = Settings.load(args.config_path)
+            try:
+                from .app import build_app as _build_app
+                _app = _build_app(args.config_path)
+                result = _app.service.search(args.query, max_results=args.max_results)
+                payload = to_jsonable(result)
+                _app.service.close()
+                _app.storage.close()
+            except Exception as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
+            if args.as_json:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                print(valid_unicode(_search_output(payload)))
+            return 0
+
+        if args.command == "fetch":
+            try:
+                from .app import build_app as _build_app
+                _app = _build_app(args.config_path)
+                target = args.target
+                is_url = target.startswith("http://") or target.startswith("https://")
+                fetch_kwargs: dict[str, object] = {}
+                if is_url:
+                    fetch_kwargs["url"] = target
+                else:
+                    fetch_kwargs["index"] = int(target)
+                    if args.run_id:
+                        fetch_kwargs["run_id"] = args.run_id
+                if args.full:
+                    fetch_kwargs["full"] = True
+                result = _app.service.fetch(**fetch_kwargs)
+                payload = to_jsonable(result)
+                _app.service.close()
+                _app.storage.close()
+            except Exception as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
+            if args.as_json:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                print(valid_unicode(_fetch_output(payload)))
+            return 0
 
         settings = Settings.load(args.config_path)
         request = ResearchRequest(
