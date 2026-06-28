@@ -3,16 +3,18 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone, UTC
 from pathlib import Path
 from typing import get_type_hints
+from unittest.mock import patch
 
 import httpx
 
 from magpie.config import Settings
-from magpie.models import AnimeField, FreshnessClass, NewsCategory, NewsRequest, NewsRequestKind, NewsTimeScope, SearchRequest, WeatherKind
+from magpie.models import AnimeField, FreshnessClass, NewsCategory, NewsReport, NewsRequest, NewsRequestKind, NewsTimeScope, SearchRequest, WeatherKind
 from magpie.providers.anilist import AniListClient
 from magpie.providers.base import AnimeClient
 from magpie.providers.exa import ExaSearchClient
@@ -464,6 +466,100 @@ class NewsRSSProviderTests(unittest.TestCase):
 
         # An empty digest must not be cached, so a transient blank feed is re-fetched.
         self.assertEqual(calls, 2)
+
+    def test_concurrent_requests_use_isolated_timezones(self) -> None:
+        # Regression test for #55: two get_news() calls running concurrently on
+        # the *same* client must each format items with the timezone they
+        # captured at entry. Previously the timezone lived in a mutable
+        # instance attribute (self._request_tz) that one call could overwrite
+        # while another was mid-conversion.
+        #
+        # We simulate two requests resolving different local timezones by
+        # patching the class-level _local_tz property to read a thread-local,
+        # so each calling thread sees its own tz without racing on a shared
+        # class attribute. Caching is disabled so each call fetches fresh.
+        published = datetime.now(UTC).strftime("%a, %d %b %Y %H:%M:%S +0000")
+        feed = f"""<?xml version="1.0"?><rss><channel><title>Feed</title>
+<item><title>Concurrent Story</title><link>https://example.com/concurrent</link><pubDate>{published}</pubDate><description>summary</description></item>
+</channel></rss>"""
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text=feed)
+
+        tz_minus5 = timezone(timedelta(hours=-5))
+        tz_plus9 = timezone(timedelta(hours=9))
+        thread_tz = threading.local()
+
+        with patch.object(
+            NewsRSSClient,
+            "_local_tz",
+            new=property(lambda self: getattr(thread_tz, "value", UTC)),
+        ):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                registry_path = Path(tmpdir) / "feeds.json"
+                registry_path.write_text(json.dumps([
+                    {"id": "ars-ai", "name": "Feed", "url": "https://feeds.test/c", "categories": ["ai"], "enabled": True},
+                    {"id": "techcrunch-ai", "name": "Off", "url": "https://techcrunch.com/category/artificial-intelligence/feed/", "categories": ["ai"], "enabled": False},
+                ]), encoding="utf-8")
+                # One shared client instance, exercised by both threads.
+                client = NewsRSSClient(
+                    self._settings(tmpdir, news_feed_registry_path=str(registry_path), news_cache_ttl_seconds=0),
+                    transport=httpx.MockTransport(handler),
+                )
+                results: dict[str, NewsReport] = {}
+                errors: list[BaseException] = []
+
+                def run(label: str, tz: timezone) -> None:
+                    thread_tz.value = tz
+                    try:
+                        results[label] = client.get_news(
+                            NewsRequest(NewsRequestKind.CATEGORY, NewsCategory.AI, NewsTimeScope.LAST_24_HOURS),
+                            5,
+                        )
+                    except BaseException as exc:  # noqa: BLE001
+                        errors.append(exc)
+
+                threads = [
+                    threading.Thread(target=run, args=("A", tz_minus5)),
+                    threading.Thread(target=run, args=("B", tz_plus9)),
+                ]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+
+        self.assertFalse(errors, f"concurrent requests failed: {errors}")
+        self.assertIn("UTC-05:00", results["A"].answer)
+        self.assertNotIn("UTC+09:00", results["A"].answer)
+        self.assertIn("UTC+09:00", results["B"].answer)
+        self.assertNotIn("UTC-05:00", results["B"].answer)
+
+    def test_helpers_use_explicit_timezone_argument(self) -> None:
+        # Locks the post-fix contract: the timezone helpers take request_tz by
+        # argument and must not rely on (now-removed) instance state.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry_path = Path(tmpdir) / "feeds.json"
+            registry_path.write_text(json.dumps([
+                {"id": "ars-ai", "name": "Feed", "url": "https://feeds.test/t", "categories": ["ai"], "enabled": True},
+                {"id": "techcrunch-ai", "name": "Off", "url": "https://techcrunch.com/category/artificial-intelligence/feed/", "categories": ["ai"], "enabled": False},
+            ]), encoding="utf-8")
+            client = NewsRSSClient(self._settings(tmpdir, news_feed_registry_path=str(registry_path)))
+            tz_minus5 = timezone(timedelta(hours=-5))
+            tz_plus9 = timezone(timedelta(hours=9))
+
+            self.assertEqual(
+                client._parse_iso("2024-01-15T12:00:00+00:00", tz_minus5).utcoffset(),
+                timedelta(hours=-5),
+            )
+            self.assertIn(
+                "UTC-05:00",
+                client._format_local_time("2024-01-15T12:00:00+00:00", tz_minus5),
+            )
+            start, _end = client._time_window(NewsTimeScope.LAST_24_HOURS, tz_plus9)
+            self.assertEqual(start.utcoffset(), timedelta(hours=9))
+
+            # The mutable instance attribute that caused the race must be gone.
+            self.assertFalse(hasattr(client, "_request_tz"))
 
 
 if __name__ == "__main__":
