@@ -206,6 +206,14 @@ class Settings:
             raise ConfigError("news_per_source_limit must be between 1 and 5.")
         if not 40 <= self.news_summary_max_characters <= 1000:
             raise ConfigError("news_summary_max_characters must be between 40 and 1000.")
+        if self.resolver_max_tokens < 1:
+            raise ConfigError("resolver_max_tokens must be positive.")
+        if self.request_timeout_seconds <= 0:
+            raise ConfigError("request_timeout_seconds must be positive.")
+        if self.cache_recent_ttl_seconds < 0:
+            raise ConfigError("cache_recent_ttl_seconds must be non-negative.")
+        if self.cache_evergreen_ttl_seconds < 0:
+            raise ConfigError("cache_evergreen_ttl_seconds must be non-negative.")
 
     @property
     def expanded_database_path(self) -> Path:
