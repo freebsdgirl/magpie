@@ -148,6 +148,20 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "retry"):
             Settings(historian_retry_count=-1).validate()
 
+    def test_resolver_timeout_and_cache_bounds_are_validated(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "resolver_max_tokens"):
+            Settings(resolver_max_tokens=0).validate()
+        with self.assertRaisesRegex(ConfigError, "resolver_max_tokens"):
+            Settings(resolver_max_tokens=-1).validate()
+        with self.assertRaisesRegex(ConfigError, "request_timeout_seconds"):
+            Settings(request_timeout_seconds=0).validate()
+        with self.assertRaisesRegex(ConfigError, "request_timeout_seconds"):
+            Settings(request_timeout_seconds=-1).validate()
+        with self.assertRaisesRegex(ConfigError, "cache_recent_ttl_seconds"):
+            Settings(cache_recent_ttl_seconds=-1).validate()
+        with self.assertRaisesRegex(ConfigError, "cache_evergreen_ttl_seconds"):
+            Settings(cache_evergreen_ttl_seconds=-1).validate()
+
 
 if __name__ == "__main__":
     unittest.main()
