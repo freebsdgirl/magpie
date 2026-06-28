@@ -19,7 +19,7 @@ from .models import (
     EvidenceItem, FetchResult, FreshnessClass, IndexedSearchResult,
     IndexedSearchResultItem, PlanningContext,
     ResearchErrorResult, ResearchRequest, ResearchResult, RequestRoute, ResponseDetail, RunBudget,
-    SearchRequest, SearchResultRecord, SourceKind, StopReason, SynthesisDraft, to_jsonable,
+    SearchRequest, SearchResultRecord, SourceKind, SpecializedRouteResult, StopReason, SynthesisDraft, to_jsonable,
 )
 from .providers.base import AnimeClient, Fetcher, NewsClient, ResolverClient, SearchClient, WeatherClient
 from .storage import SQLiteStorage, canonicalize_url, normalize_query
@@ -90,6 +90,56 @@ def detect_freshness_class(question: str) -> FreshnessClass:
     if any(current_year - 1 <= year <= current_year for year in years):
         return FreshnessClass.RECENT
     return FreshnessClass.EVERGREEN
+
+
+class RouteContext:
+    """Narrow interface handed to specialized routes.
+
+    Exposes only the mid-flow plumbing and specialized clients that routes
+    need, so :mod:`magpie.routes` depends on this named interface rather than
+    reaching into :class:`ResearchService` private helpers. The service
+    builds one per run and passes it to :func:`try_specialized_route`.
+
+    Terminal persistence and event emission stay on the service via
+    :meth:`ResearchService.finalize_specialized_route`; routes return a
+    :class:`~magpie.models.SpecializedRouteResult` and the service finalizes.
+    """
+
+    __slots__ = (
+        "_service",
+        "weather_client",
+        "anime_client",
+        "news_client",
+        "settings",
+    )
+
+    def __init__(self, service: "ResearchService") -> None:
+        self._service = service
+        # Specialized clients are immutable for the lifetime of a run.
+        self.weather_client = service.weather_client
+        self.anime_client = service.anime_client
+        self.news_client = service.news_client
+        self.settings = service.settings
+
+    def set_stage(self, run_id: str, stage: str) -> None:
+        self._service._set_stage(run_id, stage)
+
+    def select_route(self, run_id: str, route: str, fallback_reason: str | None = None) -> None:
+        self._service._select_route(run_id, route, fallback_reason)
+
+    def call_resolver(self, operation: str, *args: Any) -> Any:
+        return self._service._call_resolver(operation, *args)
+
+    def record_timing(self, timings: dict[str, list[float]], key: str, elapsed: float) -> None:
+        self._service._record_timing(timings, key, elapsed)
+
+    def trace(self, run_id: str, section: str, lines: list[str]) -> None:
+        self._service._trace(run_id, section, lines)
+
+    def record_operation_error(
+        self, run_id: str, component: str, operation: str | None, exc: Exception
+    ) -> None:
+        self._service._record_operation_error(run_id, component, operation, exc)
 
 
 @dataclass(slots=True)
@@ -490,9 +540,12 @@ class ResearchService:
 
         try:
             self._raise_if_cancelled(run_id)
-            specialized_result = try_specialized_route(self, run_id, request, timings, warnings)
+            ctx = RouteContext(self)
+            specialized_result = try_specialized_route(ctx, run_id, request, timings, warnings)
             if specialized_result is not None:
-                return specialized_result
+                return self.finalize_specialized_route(
+                    run_id, request, timings, warnings, specialized_result
+                )
             self._select_route(run_id, RequestRoute.WEB_RESEARCH.value)
             cached_ids = self.storage.find_fresh_source_ids_for_exact_query(
                 normalize_query(request.question), self._min_fetched_at(freshness)
@@ -1136,6 +1189,55 @@ class ResearchService:
             status, run_id, draft.summary, draft.answer, references,
             draft.warnings + (warnings or []), draft.limitations + (limitations or []),
             reason, self._build_debug(run_id, request, timings),
+        )
+
+    def finalize_specialized_route(
+        self,
+        run_id: str,
+        request: ResearchRequest,
+        timings: dict[str, list[float]],
+        warnings: list[str],
+        result: SpecializedRouteResult,
+    ) -> ResearchResult:
+        """Finalize a specialized (weather/anime/news) route.
+
+        This is the single persistence/event seam for specialized routes.
+        Routes return a :class:`~magpie.models.SpecializedRouteResult` and the
+        service owns: durable finalize, per-source fetch telemetry (amortized
+        across references), the terminal ``research.run.completed`` event, the
+        ``COMPLETED`` trace line, and debug payload construction. Keeps
+        :mod:`magpie.routes` off of private helpers.
+        """
+        references = result.references
+        self._finalize_storage(
+            run_id, result.summary, result.answer, references,
+            "completed", result.stop_reason,
+        )
+        # News references come from one batched fetch; amortize the batch
+        # duration across references rather than overstating each. For the
+        # single-reference weather/anime routes the divisor is 1.
+        per_source_elapsed = (
+            round(result.elapsed_ms / len(references), 2) if references else 0.0
+        )
+        for reference in references:
+            self._record_specialized_source(run_id, reference, result.provider, per_source_elapsed)
+        self._record_run_finished(
+            run_id,
+            "research.run.completed",
+            "ok",
+            result.stop_reason,
+            timings,
+            reference_ids=[item.source_id for item in references],
+        )
+        self._trace(run_id, "COMPLETED", [
+            "status: ok",
+            f"route: {result.route_name}",
+            f"reference_count: {len(references)}",
+        ])
+        return ResearchResult(
+            "ok", run_id, result.summary, result.answer, references,
+            warnings=warnings, stop_reason=result.stop_reason,
+            debug=self._build_debug(run_id, request, timings),
         )
 
     def _raise_if_cancelled(self, run_id: str) -> None:
