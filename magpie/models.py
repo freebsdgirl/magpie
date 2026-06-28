@@ -159,6 +159,35 @@ class ResearchErrorResult:
 
 
 @dataclass(slots=True)
+class SpecializedRouteResult:
+    """Outcome of a specialized (weather/anime/news) route.
+
+    Routes return this instead of building a full :class:`ResearchResult` so
+    they stay decoupled from :class:`ResearchService`'s persistence and event
+    helpers. The service owns finalization via
+    :meth:`ResearchService.finalize_specialized_route`.
+
+    ``elapsed_ms`` is the total time spent on the specialized fetch for this
+    route (e.g. one weather lookup, one anime lookup, or one batched news
+    fetch). When ``references`` contains more than one item (news), the
+    finalize seam amortizes it across references.
+
+    ``provider`` is the source-recording label (e.g. ``"neonhail"``,
+    ``"anilist"``, ``"rss"``) fed to per-source telemetry. ``route_name`` is
+    the human route label (``"weather"``/``"anime"``/``"news"``) used in the
+    completion trace; it differs from ``provider``.
+    """
+
+    summary: str
+    answer: str
+    references: list[Reference]
+    stop_reason: StopReason
+    provider: str
+    route_name: str
+    elapsed_ms: float
+
+
+@dataclass(slots=True)
 class IndexedSearchResultItem:
     index: int
     title: str
