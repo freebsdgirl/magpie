@@ -63,7 +63,6 @@ class NewsRSSClient:
         self._feeds = self._load_registry()
         self._cache: dict[str, tuple[float, list[NewsItem]]] = {}
         self._cache_lock = Lock()
-        self._request_tz = self._local_tz
 
     @property
     def _local_tz(self):
@@ -78,21 +77,24 @@ class NewsRSSClient:
 
         # Resolve the local timezone once per request so every time-window
         # calculation, future-date check, and formatting call sees the same
-        # tzinfo, even if a DST transition occurs mid-request.
-        self._request_tz = self._local_tz
+        # tzinfo, even if a DST transition occurs mid-request. It is passed by
+        # argument to the helpers below (never read from instance state) so
+        # that concurrent get_news() calls on the same client cannot race on a
+        # shared mutable timezone.
+        request_tz = self._local_tz
 
         category_feeds = [feed for feed in self._feeds if request.category in feed.categories]
         if not category_feeds:
             raise NewsError(f"No enabled RSS feeds are configured for {request.category.value}.")
 
-        started_at, ended_at = self._time_window(request.time_scope)
+        started_at, ended_at = self._time_window(request.time_scope, request_tz)
         fetched_items: list[NewsItem] = []
         warnings: list[str] = []
         failures = 0
 
         with ThreadPoolExecutor(max_workers=self.settings.news_fetch_concurrency) as executor:
             future_map = {
-                executor.submit(self._load_feed_items, feed, request.category): feed
+                executor.submit(self._load_feed_items, feed, request.category, request_tz): feed
                 for feed in category_feeds
             }
             for future in as_completed(future_map):
@@ -111,8 +113,8 @@ class NewsRSSClient:
         windowed: list[NewsItem] = []
         discarded_future = 0
         for item in fetched_items:
-            published = self._parse_iso(item.published_at)
-            if published > datetime.now(self._request_tz) + timedelta(minutes=1):
+            published = self._parse_iso(item.published_at, request_tz)
+            if published > datetime.now(request_tz) + timedelta(minutes=1):
                 discarded_future += 1
                 continue
             if started_at <= published <= ended_at:
@@ -120,7 +122,7 @@ class NewsRSSClient:
         if discarded_future:
             warnings.append(f"Discarded {discarded_future} future-dated feed items.")
 
-        selected = self._select_items(windowed, max_items)
+        selected = self._select_items(windowed, max_items, request_tz)
         if not selected:
             return self._no_results_report(request, warnings)
 
@@ -138,7 +140,7 @@ class NewsRSSClient:
         ]
         lines = [
             (
-                f"{index}. {self._format_local_time(item.published_at)} | {item.title} | {item.summary} | "
+                f"{index}. {self._format_local_time(item.published_at, request_tz)} | {item.title} | {item.summary} | "
                 f"{item.source_name} | {item.url}"
             )
             for index, item in enumerate(selected, start=1)
@@ -166,9 +168,10 @@ class NewsRSSClient:
         if live:
             checks: list[dict[str, object]] = []
             failures = 0
+            request_tz = self._local_tz
             for feed in enabled_feeds:
                 try:
-                    count = len(self._load_feed_items(feed, feed.categories[0]))
+                    count = len(self._load_feed_items(feed, feed.categories[0], request_tz))
                     checks.append({"feed_id": feed.feed_id, "status": "ok", "item_count": count})
                 except Exception as exc:  # noqa: BLE001
                     failures += 1
@@ -231,7 +234,7 @@ class NewsRSSClient:
             parsed.append(FeedDefinition(feed_id, name, url, categories, enabled))
         return parsed
 
-    def _load_feed_items(self, feed: FeedDefinition, category: NewsCategory) -> list[NewsItem]:
+    def _load_feed_items(self, feed: FeedDefinition, category: NewsCategory, request_tz) -> list[NewsItem]:
         cached = self._cache_get(feed.feed_id)
         if cached is not None:
             return cached
@@ -253,7 +256,7 @@ class NewsRSSClient:
                     title=title,
                     url=url,
                     source_name=feed_name,
-                    published_at=published.astimezone(self._request_tz).isoformat(),
+                    published_at=published.astimezone(request_tz).isoformat(),
                     summary=summary,
                     category=category,
                 )
@@ -313,11 +316,11 @@ class NewsRSSClient:
         stripper.feed(unescape(valid_unicode(text)))
         return " ".join(stripper.text().split())
 
-    def _select_items(self, items: list[NewsItem], max_items: int) -> list[NewsItem]:
+    def _select_items(self, items: list[NewsItem], max_items: int, request_tz) -> list[NewsItem]:
         deduped: list[NewsItem] = []
         seen_urls: set[str] = set()
         seen_titles: set[str] = set()
-        for item in sorted(items, key=lambda value: self._parse_iso(value.published_at), reverse=True):
+        for item in sorted(items, key=lambda value: self._parse_iso(value.published_at, request_tz), reverse=True):
             canonical_url = canonicalize_url(item.url)
             normalized_title = " ".join(item.title.lower().split())
             if canonical_url in seen_urls or normalized_title in seen_titles:
@@ -338,8 +341,8 @@ class NewsRSSClient:
             per_source[item.source_name] = count + 1
         return selected
 
-    def _time_window(self, scope: NewsTimeScope) -> tuple[datetime, datetime]:
-        now = datetime.now(self._request_tz)
+    def _time_window(self, scope: NewsTimeScope, request_tz) -> tuple[datetime, datetime]:
+        now = datetime.now(request_tz)
         if scope == NewsTimeScope.TODAY:
             start = now.replace(hour=0, minute=0, second=0, microsecond=0)
             return start, now
@@ -364,12 +367,12 @@ class NewsRSSClient:
         label = request.time_scope.value.replace("_", " ")
         return f"{count} {category} news stories for {label}."
 
-    def _format_local_time(self, value: str) -> str:
-        dt = self._parse_iso(value)
+    def _format_local_time(self, value: str, request_tz) -> str:
+        dt = self._parse_iso(value, request_tz)
         return dt.strftime("%Y-%m-%d %-I:%M %p %Z")
 
-    def _parse_iso(self, value: str) -> datetime:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(self._request_tz)
+    def _parse_iso(self, value: str, request_tz) -> datetime:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(request_tz)
 
     def _cache_get(self, feed_id: str) -> list[NewsItem] | None:
         if self.settings.news_cache_ttl_seconds == 0:
