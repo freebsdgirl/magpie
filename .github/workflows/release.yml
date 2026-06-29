@@ -13,6 +13,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Fetch full history + tags so hatch-vcs (setuptools-scm) can derive
+          # the real version from the most recent tag. Must NOT set
+          # SETUPTOOLS_SCM_PRETEND_VERSION here — release builds need the real
+          # tag-derived version, unlike CI's locked sync.
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v8.2.0
