@@ -1,5 +1,8 @@
 # Magpie
 
+[![CI](https://github.com/randileeharper/magpie/actions/workflows/ci.yml/badge.svg)](https://github.com/randileeharper/magpie/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/github/v/tag/randileeharper/magpie?label=version)](https://github.com/randileeharper/magpie/tags)
+
 Magpie is a natural-language information retrieval agent built for delegation
 from another agent. It synthesizes short grounded answers from web search and
 routes requests such as weather lookups to more appropriate APIs when possible.
