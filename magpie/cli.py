@@ -167,6 +167,9 @@ def _clear_cache_payload(settings: Settings) -> tuple[dict[str, Any], int]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "config" and args.config_command == "init" and args.print:
+        if args.path is not None or args.force:
+            parser.error("--print cannot be combined with --path or --force")
     if args.command == "clear-cache":
         try:
             settings = Settings.load(args.config_path)

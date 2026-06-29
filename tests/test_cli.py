@@ -403,6 +403,32 @@ class CLITests(unittest.TestCase):
                 os.chdir(previous_cwd)
         self.assertFalse((Path(tmpdir) / "config.json").exists())
 
+    def test_config_init_print_conflicts_with_path(self) -> None:
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as ctx:
+                cli.main(["config", "init", "--print", "--path", "/tmp/foo"])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("--print", stderr.getvalue())
+
+    def test_config_init_print_conflicts_with_force(self) -> None:
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as ctx:
+                cli.main(["config", "init", "--print", "--force"])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("--print", stderr.getvalue())
+
+    def test_config_init_print_conflicts_with_path_and_force(self) -> None:
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as ctx:
+                cli.main(
+                    ["config", "init", "--print", "--path", "/tmp/foo", "--force"]
+                )
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("--print", stderr.getvalue())
+
     def test_config_path_prints_loaded_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.json"
