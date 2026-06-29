@@ -21,6 +21,11 @@ DEFAULT_CONFIG_CANDIDATES = (
 #: Filename of the packaged template, relative to the ``magpie`` package.
 CONFIG_TEMPLATE_NAME = "config.example.json"
 
+#: Placeholder string shipped as the default ``resolver_api_key``. Users who
+#: forget to edit their config will send this literal as a Bearer header;
+#: ``magpie doctor`` warns when it is still in use with a real resolver.
+RESOLVER_API_KEY_PLACEHOLDER = "your-openai-compatible-key"
+
 
 def default_config_path() -> Path:
     """Return the config path Magpie loads by default for installed users.
@@ -114,7 +119,7 @@ class Settings:
     resolver_backend: str = "openai_compatible"
     resolver_base_url: str = "http://localhost:11434/v1"
     resolver_model: str = "qwen3:8b"
-    resolver_api_key: str = "your-openai-compatible-key"
+    resolver_api_key: str = RESOLVER_API_KEY_PLACEHOLDER
     resolver_include_reasoning: bool = False
     resolver_include_raw_output: bool = False
     resolver_max_tokens: int = 8192
@@ -171,9 +176,21 @@ class Settings:
             value = data.get(field_name, default)
             env_name = _env_name(field_name)
             if env_name in os.environ:
-                value = _coerce_value(os.environ[env_name], default)
+                raw_env = os.environ[env_name]
+                try:
+                    value = _coerce_value(raw_env, default)
+                except ValueError:
+                    raise ConfigError(
+                        f"Invalid value for {env_name}: {raw_env!r}"
+                    ) from None
             if field_name == "response_detail" and not isinstance(value, ResponseDetail):
-                value = ResponseDetail(str(value))
+                try:
+                    value = ResponseDetail(str(value))
+                except ValueError:
+                    raise ConfigError(
+                        f"Invalid value for response_detail: {value!r} "
+                        f"(expected one of: {[m.value for m in ResponseDetail]})"
+                    ) from None
             values[field_name] = value
 
         settings = cls(**values)
@@ -323,6 +340,9 @@ class Settings:
             "max_evidence_characters_per_item": self.max_evidence_characters_per_item,
             "max_synthesis_input_characters": self.max_synthesis_input_characters,
             "max_incremental_answer_characters": self.max_incremental_answer_characters,
+            "request_timeout_seconds": self.request_timeout_seconds,
+            "verify_tls": self.verify_tls,
+            "log_level": self.log_level,
             "database_path": str(self.expanded_database_path),
             "cache_recent_ttl_seconds": self.cache_recent_ttl_seconds,
             "cache_evergreen_ttl_seconds": self.cache_evergreen_ttl_seconds,
