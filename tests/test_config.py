@@ -90,11 +90,75 @@ class SettingsTests(unittest.TestCase):
                 with self.assertRaisesRegex(ConfigError, "JSON object"):
                     Settings.load(str(config_path))
 
+    def test_invalid_env_int_raises_config_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text("{}", encoding="utf-8")
+            os.environ["MAGPIE_HTTP_PORT"] = "abc"
+            try:
+                with self.assertRaisesRegex(ConfigError, "MAGPIE_HTTP_PORT"):
+                    Settings.load(str(config_path))
+            finally:
+                os.environ.pop("MAGPIE_HTTP_PORT", None)
+
+    def test_invalid_env_float_raises_config_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text("{}", encoding="utf-8")
+            os.environ["MAGPIE_SEARCH_TIMEOUT_SECONDS"] = "not-a-number"
+            try:
+                with self.assertRaisesRegex(ConfigError, "MAGPIE_SEARCH_TIMEOUT_SECONDS"):
+                    Settings.load(str(config_path))
+            finally:
+                os.environ.pop("MAGPIE_SEARCH_TIMEOUT_SECONDS", None)
+
+    def test_invalid_response_detail_in_config_raises_config_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(
+                json.dumps({"response_detail": "bogus"}), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ConfigError, "response_detail"):
+                Settings.load(str(config_path))
+
     def test_news_settings_are_exposed_in_diagnostics(self) -> None:
         settings = Settings(news_enabled=True, news_digest_size=4, news_summary_max_characters=200)
         diagnostics = settings.sanitized_diagnostics()
         self.assertEqual(diagnostics["news_digest_size"], 4)
         self.assertEqual(diagnostics["news_summary_max_characters"], 200)
+
+    def test_diagnostics_cover_all_non_secret_fields(self) -> None:
+        """No Settings field should silently disappear from diagnostics.
+
+        Secret fields (API keys, tokens) are excluded or redacted; everything
+        else must appear so that ``magpie doctor`` reflects the full config.
+        """
+        from dataclasses import fields
+
+        settings = Settings()
+        settings.validate()
+        diagnostics = settings.sanitized_diagnostics()
+
+        secret_fields = {"search_api_key", "resolver_api_key", "historian_token"}
+        init_field_names = {f.name for f in fields(Settings) if f.init}
+        expected_keys = (init_field_names - secret_fields) | {
+            "loaded_config_path",
+            "has_historian_token",
+        }
+        actual_keys = set(diagnostics)
+
+        missing = expected_keys - actual_keys
+        extra = actual_keys - expected_keys
+        self.assertFalse(missing, f"diagnostics missing fields: {sorted(missing)}")
+        self.assertFalse(extra, f"diagnostics has unexpected keys: {sorted(extra)}")
+
+    def test_diagnostics_include_verify_tls_and_log_level(self) -> None:
+        settings = Settings(verify_tls=False, log_level="DEBUG")
+        diagnostics = settings.sanitized_diagnostics()
+        self.assertIn("verify_tls", diagnostics)
+        self.assertIn("log_level", diagnostics)
+        self.assertFalse(diagnostics["verify_tls"])
+        self.assertEqual(diagnostics["log_level"], "DEBUG")
 
     def test_historian_defaults_and_token_redaction(self) -> None:
         settings = Settings()
