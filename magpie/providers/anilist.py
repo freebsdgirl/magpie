@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from html.parser import HTMLParser
 from typing import Any
 import unicodedata
@@ -209,11 +209,12 @@ class AniListClient:
                 credits.append(CharacterCredit(str(name), [str(actor) for actor in actors]))
         return title, credits, self._reference(anime_id, title)
 
-    def get_daily_schedule(self) -> AnimeReport:
+    def get_daily_schedule(self, day_offset: int = 0) -> AnimeReport:
         local_now = datetime.now().astimezone()
         local_tz = local_now.tzinfo
-        start = datetime.combine(local_now.date(), time.min, local_tz)
-        end = datetime.combine(local_now.date(), time.max, local_tz)
+        target_date = local_now.date() + timedelta(days=day_offset)
+        start = datetime.combine(target_date, time.min, local_tz)
+        end = datetime.combine(target_date, time.max, local_tz)
         data = self._query(
             """
             query ($start: Int!, $end: Int!, $limit: Int!) {
@@ -241,7 +242,7 @@ class AniListClient:
             title = self._title(media)
             airing = datetime.fromtimestamp(item["airingAt"]).astimezone()
             lines.append(f"{self._format_clock(airing)} - {title}, episode {item.get('episode', '?')}")
-        date_label = f"{local_now.strftime('%A, %B')} {local_now.day}, {local_now.year}"
+        date_label = f"{start.strftime('%A, %B')} {start.day}, {start.year}"
         zone_label = local_now.tzname() or "local time"
         answer = (
             f"Anime airing schedule for {date_label} ({zone_label}):\n" + "\n".join(lines)
@@ -252,7 +253,7 @@ class AniListClient:
             summary=f"Anime airing schedule for {date_label}.",
             answer=answer,
             reference=Reference(
-                "anilist:schedule:" + local_now.date().isoformat(),
+                "anilist:schedule:" + target_date.isoformat(),
                 "AniList airing schedule",
                 "https://anilist.co/search/anime",
                 "AniList",

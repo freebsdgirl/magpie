@@ -234,6 +234,7 @@ class AnimeRequest:
     title_query: str | None = None
     character_query: str | None = None
     requested_fields: list[AnimeField] = field(default_factory=list)
+    day_offset: int = 0
 
 
 @dataclass(slots=True)

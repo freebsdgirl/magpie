@@ -272,7 +272,8 @@ class FakeAnimeClient:
             Reference("anime", "Yakuza Fiancé", "https://anilist.co/anime/170468", "AniList", None, None),
         )
 
-    def get_daily_schedule(self):
+    def get_daily_schedule(self, day_offset=0):
+        self.last_day_offset = day_offset
         return AnimeReport(
             "Today's anime schedule.",
             "Anime airing schedule for Saturday (PDT):\n5:00 PM - Example Anime, episode 3",
@@ -373,6 +374,26 @@ class ServiceTests(unittest.TestCase):
             )
             result = service.research(ResearchRequest(question="anime schedule for today"))
 
+        self.assertIn("Example Anime, episode 3", result.answer)
+
+    def test_anime_schedule_route_passes_day_offset(self) -> None:
+        class TomorrowScheduleResolver(AnimeRoutingResolver):
+            def __init__(self) -> None:
+                super().__init__(AnimeRequestKind.SCHEDULE)
+
+            def classify_anime_request(self, question):
+                return AnimeRequest(AnimeRequestKind.SCHEDULE, day_offset=1)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            anime_client = FakeAnimeClient()
+            service = self._service(
+                tmpdir,
+                resolver=TomorrowScheduleResolver(),
+                anime_client=anime_client,
+            )
+            result = service.research(ResearchRequest(question="what anime is airing tomorrow?"))
+
+        self.assertEqual(anime_client.last_day_offset, 1)
         self.assertIn("Example Anime, episode 3", result.answer)
 
     def test_weather_route_bypasses_web_research(self) -> None:
