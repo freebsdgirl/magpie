@@ -44,6 +44,7 @@ event types are:
 | `research.source.discovered`    | A new source is found in search results     |
 | `research.source.fetched`       | A source's content is acquired              |
 | `research.source.rejected`      | A source is rejected for a query             |
+| `research.cache.hit`           | A cached source is reused (exact-query or URL) |
 | `research.synthesis.completed`  | A synthesis call completes                  |
 
 ## What Is Not Emitted

@@ -57,6 +57,7 @@ magpie/
   providers/        Provider implementations and Protocol interfaces
     base.py         ResolverClient, SearchClient, Fetcher, WeatherClient,
                     AnimeClient, NewsClient protocols
+    _http.py        Shared HTTP retry-with-backoff helper for provider clients
     exa.py          Exa search (MCP-first, API fallback)
     crawl4ai_fetcher.py  Crawl4AI page fetcher
     openai_compatible.py  OpenAI-compatible resolver client
@@ -194,6 +195,7 @@ A run ends with a `StopReason` describing why it stopped:
 | `no_progress`           | Planner could not produce a new useful query                  |
 | `cancelled`              | Run was cancelled via A2A task cancellation                   |
 | `failed`                 | Run ended due to an exception                                 |
+| `internal_error`         | Run ended due to an internal error                             |
 
 ## Concurrency and Cancellation
 

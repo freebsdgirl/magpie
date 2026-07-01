@@ -85,6 +85,17 @@ JSON and is not affected by text-format changes.
 | `fetch_provider`         | `crawl4ai`  | `crawl4ai` or `fake`        |
 | `crawl4ai_setup_required`| `true`      | Whether `doctor` enforces browser asset setup |
 
+### HTTP
+
+These settings govern outbound HTTP calls made by provider clients through the
+shared retry helper in `providers/_http.py`:
+
+| Setting                    | Default  | Notes                                  |
+| -------------------------- | -------- | -------------------------------------- |
+| `fetch_timeout_seconds`    | `120.0`  | Per-request timeout for fetch calls; must be positive |
+| `http_retry_max_attempts`  | `2`      | Total attempts per HTTP call (1 = no retry); min 1 |
+| `http_retry_backoff_seconds`| `1.0`  | Base for exponential backoff between retries; non-negative |
+
 ### Resolver
 
 | Setting                      | Default                                   | Notes                                              |
@@ -97,6 +108,7 @@ JSON and is not affected by text-format changes.
 | `resolver_include_raw_output`| `false`                                   | Write raw model output to the resolver log        |
 | `resolver_max_tokens`        | `8192`                                    | Max generation tokens                             |
 | `resolver_debug_log_path`    | `~/.local/share/magpie/magpie-resolver.log`| Resolver log file                                |
+| `resolver_debug_log_max_bytes`| `10485760`                            | Max bytes before the resolver log rotates; `0` disables rotation |
 | `fetch_debug_log_path`       | `~/.local/share/magpie/magpie-fetch.log`  | Fetch log file                                    |
 
 ### Weather
