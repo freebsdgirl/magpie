@@ -564,6 +564,86 @@ class OpenAICompatibleResolverTests(unittest.TestCase):
         self.assertEqual(request.kind, AnimeRequestKind.CREDITS)
         self.assertEqual(request.requested_fields, [])
 
+    def test_classify_anime_request_schedule_tomorrow_sets_day_offset(self) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": (
+                    '{"kind":"schedule","title_query":null,"character_query":null,'
+                    '"requested_fields":[],"day_offset":1}'
+                )}}]},
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            client = OpenAICompatibleResolverClient(
+                settings=self._settings(tmpdir),
+                transport=httpx.MockTransport(handler),
+            )
+            request = client.classify_anime_request("what anime is airing tomorrow?")
+
+        self.assertEqual(request.kind, AnimeRequestKind.SCHEDULE)
+        self.assertEqual(request.day_offset, 1)
+
+    def test_classify_anime_request_invalid_day_offset_defaults_to_zero(self) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": (
+                    '{"kind":"schedule","title_query":null,"character_query":null,'
+                    '"requested_fields":[],"day_offset":"oops"}'
+                )}}]},
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            client = OpenAICompatibleResolverClient(
+                settings=self._settings(tmpdir),
+                transport=httpx.MockTransport(handler),
+            )
+            request = client.classify_anime_request("what anime is airing today?")
+
+        self.assertEqual(request.kind, AnimeRequestKind.SCHEDULE)
+        self.assertEqual(request.day_offset, 0)
+
+    def test_classify_anime_request_out_of_range_day_offset_is_clamped(self) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": (
+                    '{"kind":"schedule","title_query":null,"character_query":null,'
+                    '"requested_fields":[],"day_offset":99}'
+                )}}]},
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            client = OpenAICompatibleResolverClient(
+                settings=self._settings(tmpdir),
+                transport=httpx.MockTransport(handler),
+            )
+            request = client.classify_anime_request("what anime is airing in three months?")
+
+        self.assertEqual(request.kind, AnimeRequestKind.SCHEDULE)
+        self.assertEqual(request.day_offset, 14)
+
+    def test_classify_anime_request_lookup_forces_day_offset_zero(self) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": (
+                    '{"kind":"lookup","title_query":"Bookworm","character_query":null,'
+                    '"requested_fields":["episodes"],"day_offset":3}'
+                )}}]},
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            client = OpenAICompatibleResolverClient(
+                settings=self._settings(tmpdir),
+                transport=httpx.MockTransport(handler),
+            )
+            request = client.classify_anime_request("episodes of Bookworm?")
+
+        self.assertEqual(request.kind, AnimeRequestKind.LOOKUP)
+        self.assertEqual(request.day_offset, 0)
+
     def test_resolver_debug_log_is_cleared_and_written(self) -> None:
         def handler(_request: httpx.Request) -> httpx.Response:
             return httpx.Response(

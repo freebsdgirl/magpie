@@ -299,6 +299,52 @@ class AniListProviderTests(unittest.TestCase):
                 os.environ["TZ"] = previous_tz
             time.tzset()
 
+    def test_schedule_day_offset_shifts_query_window_and_label(self) -> None:
+        previous_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "America/Los_Angeles"
+        time.tzset()
+        try:
+            captured: dict[str, int] = {}
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                body = json.loads(request.content)
+                captured["start"] = body["variables"]["start"]
+                captured["end"] = body["variables"]["end"]
+                return httpx.Response(200, json={"data": {"Page": {"airingSchedules": [{
+                    "airingAt": captured["start"] + 17 * 3600,
+                    "episode": 3,
+                    "media": {"id": 1, "title": {"english": "Example Anime", "romaji": "Example"}},
+                }]}}})
+
+            client = AniListClient(
+                Settings(anime_base_url="https://anilist.test"),
+                httpx.MockTransport(handler),
+            )
+            report = client.get_daily_schedule(day_offset=1)
+
+            from datetime import time as _time
+            now = datetime.now().astimezone()
+            tomorrow = now.date() + timedelta(days=1)
+            local_tz = now.tzinfo
+            tomorrow_start = datetime.combine(tomorrow, _time.min, local_tz)
+            tomorrow_end = datetime.combine(tomorrow, _time.max, local_tz)
+            self.assertGreaterEqual(captured["start"], int(tomorrow_start.timestamp()))
+            self.assertLessEqual(captured["end"], int(tomorrow_end.timestamp()))
+
+            date_label = f"{tomorrow_start.strftime('%A, %B')} {tomorrow_start.day}, {tomorrow_start.year}"
+            self.assertEqual(
+                report.answer,
+                f"Anime airing schedule for {date_label} ({now.tzname()}):\n"
+                "5:00 PM - Example Anime, episode 3",
+            )
+            self.assertEqual(report.reference.source_id, "anilist:schedule:" + tomorrow.isoformat())
+        finally:
+            if previous_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous_tz
+            time.tzset()
+
 
 class NewsRSSProviderTests(unittest.TestCase):
     def _settings(self, tmpdir: str, **overrides: object) -> Settings:

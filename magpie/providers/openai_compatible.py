@@ -123,10 +123,11 @@ class OpenAICompatibleResolverClient:
         return RouteDecision(route=route, weather_kind=weather_kind, zip_code=zip_code)
 
     def classify_anime_request(self, question: str) -> AnimeRequest:
+        today = datetime.now().astimezone()
         payload = self._ask_json(
             "classify_anime_request",
             system=load_prompt("classify_anime_request"),
-            user={"question": question},
+            user={"question": question, "today": today.strftime("%A, %B %d, %Y")},
             schema_name="magpie_anime_request",
             schema={
                 "type": "object",
@@ -140,8 +141,9 @@ class OpenAICompatibleResolverClient:
                         "maxItems": 6,
                         "uniqueItems": True,
                     },
+                    "day_offset": {"type": "integer", "minimum": -1, "maximum": 14},
                 },
-                "required": ["kind", "title_query", "character_query", "requested_fields"],
+                "required": ["kind", "title_query", "character_query", "requested_fields", "day_offset"],
                 "additionalProperties": False,
             },
         )
@@ -167,7 +169,14 @@ class OpenAICompatibleResolverClient:
             kind = AnimeRequestKind.LOOKUP
         if kind == AnimeRequestKind.LOOKUP and not fields:
             fields = [AnimeField.DESCRIPTION]
-        return AnimeRequest(kind, title, character, fields)
+        try:
+            day_offset = int(payload.get("day_offset", 0))
+        except (TypeError, ValueError):
+            day_offset = 0
+        day_offset = max(-1, min(14, day_offset))
+        if kind != AnimeRequestKind.SCHEDULE:
+            day_offset = 0
+        return AnimeRequest(kind, title, character, fields, day_offset)
 
     def classify_news_request(self, question: str) -> NewsRequest:
         payload = self._ask_json(

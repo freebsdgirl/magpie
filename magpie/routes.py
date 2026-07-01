@@ -120,11 +120,12 @@ def try_anime_route(
             f"title_query: {anime_request.title_query or ''}",
             f"character_query: {anime_request.character_query or ''}",
             f"requested_fields: {', '.join(item.value for item in anime_request.requested_fields)}",
+            f"day_offset: {anime_request.day_offset}",
             f"elapsed_ms: {elapsed}",
         ])
         started = perf_counter()
         if anime_request.kind == AnimeRequestKind.SCHEDULE:
-            report = ctx.anime_client.get_daily_schedule()
+            report = ctx.anime_client.get_daily_schedule(anime_request.day_offset)
         else:
             if not anime_request.title_query:
                 raise AnimeError("Anime title could not be determined.")
